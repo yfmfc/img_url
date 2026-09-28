@@ -988,6 +988,14 @@ function renderImageList() {
     }
 }
 
+function buildImageBody(body) {
+    // 方式一：图片库 + 宏
+    buildImageListBody(body);
+    // 方式二：位置注入（与方式一同属一个功能，两种注入方式）
+    body.append(el('div', { class: 'st-itk-hint', html: '<b>方式二 · 位置注入：</b>像世界书一样指定插入位置/深度/角色，把图片 + 描述固定注入到提示词结构里（适合固定形象设定）。两种方式可同时使用。' }));
+    buildInjectionBody(body);
+}
+
 function buildInjectionBody(body) {
     const imgSel = el('select', { class: 'text_pole st-itk-grow' });
     const caption = el('textarea', { class: 'text_pole st-itk-panel-textarea', placeholder: '图片搭配的文字描述（可选，会与图片一起插入）' });
@@ -1038,7 +1046,7 @@ function buildInjectionBody(body) {
     });
 
     body.append(
-        el('div', { class: 'st-itk-hint', text: '像世界书一样选择插入位置/深度/角色，把图片 + 描述注入到提示词结构里（适合固定的形象设定）。若想手动控制位置，请改用宏。' }),
+        el('div', { class: 'st-itk-hint', text: '选择图片 + 可选描述 → 添加注入；下方列表可随时启用/停用/删除。若想手动控制位置请用方式一的宏。' }),
         el('div', { class: 'st-itk-row' }, [
             imgSel,
             posSel,
@@ -1251,18 +1259,31 @@ function buildUi() {
         console.warn(`${EXT_NAME}: 未找到扩展设置容器`);
         return;
     }
-    const panel = el('div', { id: 'st-itk-panel' }, [
-        el('div', { class: 'st-itk-title' }, [
-            el('i', { class: 'fa-solid fa-toolbox' }),
-            el('span', { text: EXT_NAME }),
-            el('span', { class: 'st-itk-ver', text: 'v1.0.0' }),
-        ]),
+
+    // 内部四个功能区（默认收纳，点顶部按钮展开）
+    const inner = el('div', { class: 'st-itk-body', hidden: 'hidden' }, [
         section('聊天记录清理', 'fa-solid fa-broom', buildCleanupBody),
-        section('图片库 / 宏 {{img::名称}}', 'fa-solid fa-image', buildImageListBody),
-        section('图片注入（预处理位置）', 'fa-solid fa-thumbtack', buildInjectionBody),
+        section('图片插入（宏 / 位置注入）', 'fa-solid fa-image', buildImageBody),
         section('Preset JSON 整理器', 'fa-solid fa-list-ordered', buildPresetBody),
         section('图片格式转换', 'fa-solid fa-file-image', buildConvertBody),
     ]);
+
+    // 顶部收纳按钮：整个插件的总开关式折叠
+    const topHead = el('button', {
+        class: 'st-itk-head st-itk-top', type: 'button', 'aria-expanded': 'false',
+    }, [
+        el('i', { class: 'fa-solid fa-toolbox' }),
+        el('span', { text: EXT_NAME }),
+        el('span', { class: 'st-itk-ver', text: 'v1.1.0' }),
+        el('i', { class: 'fa-solid fa-chevron-down st-itk-chev' }),
+    ]);
+    topHead.addEventListener('click', () => {
+        const open = inner.hidden;
+        inner.hidden = !open;
+        topHead.setAttribute('aria-expanded', String(open));
+    });
+
+    const panel = el('div', { id: 'st-itk-panel' }, [topHead, inner]);
     container.append(panel);
 }
 
