@@ -161,6 +161,14 @@
     min-height: 180px;
 }
 
+/* JSON 预览框限高，避免长内容霸屏 */
+.st-itk-json-box {
+    min-height: 120px;
+    max-height: 240px;
+    overflow: auto;
+    resize: vertical;
+}
+
 .st-itk-list {
     display: flex;
     flex-direction: column;

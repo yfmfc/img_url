@@ -716,23 +716,6 @@ function organizePreset(rawText, indent) {
     return JSON.stringify(data, null, indent);
 }
 
-function doOrganizePreset() {
-    const raw = ui.presetInput.value.trim();
-    if (!raw) {
-        toast('warning', '请先粘贴或选择 Preset JSON');
-        return;
-    }
-    try {
-        const indent = Number(ui.presetIndent.value) || 2;
-        ui.presetOutput.value = organizePreset(raw, indent);
-        ui.presetStatus.textContent = `整理完成：${JSON.parse(ui.presetOutput.value).prompts.length} 个 prompt 已按 prompt_order 重排`;
-        toast('success', '整理完成');
-    } catch (e) {
-        ui.presetStatus.textContent = e.message;
-        toast('error', e.message);
-    }
-}
-
 function downloadText(filename, text, mime = 'application/json') {
     const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);
@@ -1024,103 +1007,127 @@ function buildCleanupBody(body) {
 }
 
 function buildPresetBody(body) {
-    const input = el('textarea', { class: 'text_pole st-itk-panel-textarea tall', placeholder: '在此粘贴或编辑 JSON（可直接手动修改），也可点“上传”载入 .json 文件' });
-    const output = el('textarea', { class: 'text_pole st-itk-panel-textarea tall', placeholder: '整理结果会显示在这里' });
-    const indentSel = el('select', { class: 'text_pole' }, [
-        el('option', { value: '2', text: '缩进 2' }),
-        el('option', { value: '4', text: '缩进 4' }),
-        el('option', { value: '0', text: '紧凑' }),
-    ]);
-    const status = el('div', { class: 'st-itk-status' });
+    // 预览框 1：JSON 内容（可直接编辑）
+    const input = el('textarea', {
+        class: 'text_pole st-itk-panel-textarea st-itk-json-box',
+        placeholder: 'JSON 内容全部显示在这里，可直接编辑；或点“上传文件”载入 .json',
+    });
+    // 整理预览框：未整理时隐藏
+    const output = el('textarea', {
+        class: 'text_pole st-itk-panel-textarea st-itk-json-box',
+        placeholder: '整理结果', readonly: 'readonly',
+    });
+    const outputWrap = el('div', { hidden: 'hidden' }, [output]);
+    const status = el('span', { class: 'st-itk-status' });
     ui.presetInput = input;
     ui.presetOutput = output;
-    ui.presetIndent = indentSel;
     ui.presetStatus = status;
+    let organized = false;
 
     const fileInput = filePicker('.json,application/json', false, async (files) => {
         try {
             input.value = await files[0].text();
+            organized = false;
+            outputWrap.hidden = true;
             status.textContent = `已载入：${files[0].name}（${fmtBytes(files[0].size)}）`;
         } catch (e) {
             status.textContent = `读取失败：${e.message}`;
         }
     });
 
-    // ---- 查找 / 替换（默认收纳，点按钮展开）----
-    const findInput = el('input', { class: 'text_pole st-itk-grow', type: 'text', placeholder: '查找内容' });
-    const replInput = el('input', { class: 'text_pole st-itk-grow', type: 'text', placeholder: '替换为' });
-    const frStatus = el('span', { class: 'st-itk-status' });
+    // ---- 查找 / 替换 ----
+    const findInput = el('input', { class: 'text_pole st-itk-grow', type: 'text', placeholder: '查找内容（回车=查找下一处）' });
+    const replInput = el('input', { class: 'text_pole st-itk-grow', type: 'text', placeholder: '替换成' });
 
     function findNext() {
         const q = findInput.value;
-        if (!q) { frStatus.textContent = '输入查找内容'; return; }
+        if (!q) { status.textContent = '输入查找内容'; return; }
         const text = input.value;
         const from = Math.max(input.selectionEnd ?? 0, 0);
         let idx = text.indexOf(q, from);
         if (idx < 0) idx = text.indexOf(q); // 回绕到开头
-        if (idx < 0) { frStatus.textContent = '未找到'; return; }
+        if (idx < 0) { status.textContent = '未找到'; return; }
         input.focus();
         input.setSelectionRange(idx, idx + q.length);
         scrollTextareaTo(input, idx);
-        frStatus.textContent = `命中 #${text.slice(0, idx).split(q).length} · 位置 ${idx}`;
+        status.textContent = `命中 #${text.slice(0, idx).split(q).length} · 位置 ${idx}`;
     }
+    findInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); findNext(); }
+    });
 
     function replaceOne() {
         const q = findInput.value;
-        if (!q) { frStatus.textContent = '输入查找内容'; return; }
+        if (!q) { status.textContent = '输入查找内容'; return; }
         const selStart = input.selectionStart ?? 0;
         const selEnd = input.selectionEnd ?? 0;
         if (input.value.slice(selStart, selEnd) === q) {
             input.setRangeText(replInput.value, selStart, selEnd, 'end');
-            frStatus.textContent = '已替换 1 处，继续查找下一处';
+            status.textContent = '已替换 1 处，继续查找下一处';
         }
         findNext();
     }
 
     function replaceAll() {
         const q = findInput.value;
-        if (!q) { frStatus.textContent = '输入查找内容'; return; }
+        if (!q) { status.textContent = '输入查找内容'; return; }
         const count = input.value.split(q).length - 1;
-        if (!count) { frStatus.textContent = '未找到'; return; }
+        if (!count) { status.textContent = '未找到'; return; }
         input.value = input.value.split(q).join(replInput.value);
-        frStatus.textContent = `已全部替换 ${count} 处`;
+        status.textContent = `已全部替换 ${count} 处`;
     }
 
-    const frRow = el('div', { class: 'st-itk-row', hidden: 'hidden' }, [
-        findInput,
-        replInput,
-        el('button', { class: 'menu_button', type: 'button', text: '下一处', onclick: () => findNext() }),
-        el('button', { class: 'menu_button', type: 'button', text: '替换', onclick: replaceOne }),
-        el('button', { class: 'menu_button', type: 'button', text: '全部替换', onclick: replaceAll }),
-        frStatus,
-    ]);
+    // ---- 整理 ----
+    const organizeBtn = el('button', { class: 'menu_button', type: 'button', text: '整理' });
+    organizeBtn.addEventListener('click', () => {
+        const raw = input.value.trim();
+        if (!raw) { status.textContent = '没有可整理的内容'; toast('warning', '请先上传或粘贴 JSON'); return; }
+        try {
+            output.value = organizePreset(raw, 4);
+            outputWrap.hidden = false;
+            organized = true;
+            status.textContent = `整理完成：${JSON.parse(output.value).prompts.length} 个 prompt 已按 prompt_order 重排`;
+            toast('success', '整理完成');
+        } catch (e) {
+            status.textContent = e.message;
+            toast('error', e.message);
+        }
+    });
 
-    const frToggle = el('button', { class: 'menu_button', type: 'button', text: '查找/替换' });
-    frToggle.addEventListener('click', () => {
-        frRow.hidden = !frRow.hidden;
-        if (!frRow.hidden) findInput.focus();
+    // ---- 功能说明（收纳）----
+    const helpText = el('div', {
+        class: 'st-itk-hint st-itk-help', hidden: 'hidden',
+        html: '整理：按 <span class="st-itk-mono">prompt_order</span> 的 ID 顺序重排 <span class="st-itk-mono">prompts</span> 数组，其他任何数据（含字段顺序）原样保留。<br>查找/替换：直接编辑上方 JSON；查找框回车 = 查找下一处并高亮定位，替换 = 替换当前命中并跳下一处，全部替换 = 一次替换所有。<br>导出：未整理时导出上方编辑框内容，整理后导出下方整理结果。',
+    });
+    const helpBtn = el('button', { class: 'menu_button', type: 'button', text: '功能说明' });
+    helpBtn.addEventListener('click', () => { helpText.hidden = !helpText.hidden; });
+
+    // ---- 导出（整理预览框之后）----
+    const exportBtn = el('button', {
+        class: 'menu_button', type: 'button', text: '导出',
+        onclick: () => {
+            const text = organized ? output.value : input.value;
+            if (!text.trim()) { toast('warning', '没有可导出的内容'); return; }
+            downloadText(organized ? 'preset-organized.json' : 'preset.json', text);
+        },
     });
 
     body.append(
         el('div', { class: 'st-itk-row' }, [
-            el('button', { class: 'menu_button', type: 'button', text: '上传', onclick: () => fileInput.click() }),
+            el('button', { class: 'menu_button', type: 'button', text: '上传文件', onclick: () => fileInput.click() }),
             fileInput,
-            el('button', { class: 'menu_button', type: 'button', text: '整理', onclick: doOrganizePreset }),
-            indentSel,
-            el('button', { class: 'menu_button', type: 'button', text: '复制', onclick: () => output.value && copyText(output.value) }),
-            el('button', {
-                class: 'menu_button', type: 'button', text: '导出',
-                onclick: () => {
-                    if (!output.value) { toast('warning', '没有可导出的结果'); return; }
-                    downloadText('preset-organized.json', output.value);
-                },
-            }),
-            frToggle,
         ]),
-        frRow,
-        status,
         input,
-        output,
+        el('div', { class: 'st-itk-row' }, [findInput, replInput]),
+        el('div', { class: 'st-itk-row' }, [
+            el('button', { class: 'menu_button', type: 'button', text: '替换', onclick: replaceOne }),
+            el('button', { class: 'menu_button', type: 'button', text: '全部替换', onclick: replaceAll }),
+            status,
+        ]),
+        el('div', { class: 'st-itk-row' }, [organizeBtn, helpBtn]),
+        helpText,
+        outputWrap,
+        el('div', { class: 'st-itk-row' }, [exportBtn]),
     );
 }
 
@@ -1175,8 +1182,7 @@ function buildUi() {
             '扫描最后聊天时间早于 N 天的角色卡及其聊天记录，勾选后批量删除。<b>当前打开的聊天会自动跳过</b>；删除不可恢复，建议先自行备份。支持按“角色最后聊天时间”或“每条聊天最后消息时间”两种口径过滤。'),
         section('图片插入（宏）', 'fa-solid fa-image', buildImageBody,
             '上传图片后点“复制宏”得到 <span class="st-itk-mono">{{img::图片名}}</span>，粘贴到<b>世界书 / 角色描述 / 预设提示词 / 聊天</b>任意位置，发请求时自动替换为真正的图片内容（支持视觉模型，Claude / Gemini / OpenRouter 自动转换；不支持图片的 API 自动降级为文字）。<b>点击缩略图可预览大图</b>。'),
-        section('Preset JSON 整理器', 'fa-solid fa-list-ordered', buildPresetBody,
-            '整理：按 <span class="st-itk-mono">prompt_order</span> 的 ID 顺序重排 <span class="st-itk-mono">prompts</span> 数组，其他任何数据（含字段顺序）原样保留。输入框可直接编辑 JSON，点“查找/替换”展开搜索工具（支持下一处 / 替换 / 全部替换）。'),
+        section('Preset JSON 整理器', 'fa-solid fa-list-ordered', buildPresetBody),
         section('图片格式转换', 'fa-solid fa-file-image', buildConvertBody,
             'JPG / PNG 互转。质量调节对 JPG 有效（PNG 为无损格式）；缩放对两者都有效。透明背景转 JPG 会自动铺白底。'),
     ]);
