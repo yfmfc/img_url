@@ -1,0 +1,251 @@
+/* Image Toolkit —— 全部配色取自 SillyTavern 当前主题变量，自动跟随用户主题 */
+
+#st-itk-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.st-itk-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 700;
+    color: var(--SmartThemeBodyColor);
+    opacity: .95;
+    padding: 2px 2px 0;
+}
+
+.st-itk-title .st-itk-ver {
+    font-size: 0.75em;
+    opacity: .6;
+    font-weight: 400;
+}
+
+.st-itk-section {
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 10px;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 5%, transparent);
+}
+
+.st-itk-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 9px 12px;
+    cursor: pointer;
+    user-select: none;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 8%, transparent);
+    color: var(--SmartThemeBodyColor);
+    border: none;
+    text-align: left;
+    font-size: 0.95em;
+    font-weight: 600;
+    box-sizing: border-box;
+}
+
+.st-itk-head:hover {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 14%, transparent);
+}
+
+.st-itk-head .st-itk-chev {
+    margin-left: auto;
+    transition: transform .18s ease;
+    opacity: .7;
+}
+
+.st-itk-head[aria-expanded="true"] .st-itk-chev {
+    transform: rotate(180deg);
+}
+
+.st-itk-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px 12px;
+}
+
+.st-itk-body[hidden] {
+    display: none;
+}
+
+.st-itk-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.st-itk-row.wrap {
+    flex-wrap: wrap;
+}
+
+.st-itk-hint {
+    font-size: 0.82em;
+    opacity: .75;
+    color: var(--SmartThemeBodyColor);
+    line-height: 1.5;
+}
+
+.st-itk-mono {
+    font-family: monospace;
+    font-size: 0.85em;
+    padding: 1px 6px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 22%, transparent);
+    color: var(--SmartThemeQuoteColor);
+    word-break: break-all;
+}
+
+.st-itk-num {
+    width: 72px;
+    min-width: 56px;
+    text-align: center;
+}
+
+.st-itk-grow {
+    flex: 1 1 160px;
+    min-width: 120px;
+}
+
+.st-itk-panel-textarea {
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    box-sizing: border-box;
+    font-size: 0.82em;
+}
+
+.st-itk-panel-textarea.tall {
+    min-height: 180px;
+}
+
+.st-itk-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+.st-itk-item {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 6px 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 4%, transparent);
+    color: var(--SmartThemeBodyColor);
+    font-size: 0.86em;
+}
+
+.st-itk-item .st-itk-thumb {
+    width: 40px;
+    height: 40px;
+    object-fit: cover;
+    border-radius: 6px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    flex: 0 0 auto;
+}
+
+.st-itk-item .st-itk-name {
+    font-weight: 600;
+    word-break: break-all;
+}
+
+.st-itk-item .st-itk-meta {
+    opacity: .7;
+    font-size: 0.92em;
+}
+
+.st-itk-item .st-itk-sp {
+    margin-left: auto;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.st-itk-sub {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 2px 0 2px 12px;
+    padding-left: 10px;
+    border-left: 2px solid color-mix(in srgb, var(--SmartThemeBorderColor) 80%, transparent);
+}
+
+.st-itk-status {
+    font-size: 0.85em;
+    opacity: .85;
+    color: var(--SmartThemeBodyColor);
+    word-break: break-all;
+}
+
+.st-itk-progress {
+    height: 4px;
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 12%, transparent);
+    overflow: hidden;
+}
+
+.st-itk-progress>div {
+    height: 100%;
+    width: 0;
+    background: var(--SmartThemeQuoteColor);
+    transition: width .2s ease;
+}
+
+.st-itk-disabled {
+    opacity: .45;
+}
+
+.st-itk-range {
+    flex: 1 1 140px;
+    min-width: 110px;
+}
+
+.st-itk-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.st-itk-badge {
+    font-size: 0.75em;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 25%, transparent);
+    color: var(--SmartThemeQuoteColor);
+    font-weight: 500;
+}
+
+/* 移动端：按钮与条目尽量占满一行，避免一次性铺满整个屏幕 */
+@media (max-width: 768px) {
+
+    .st-itk-row>.menu_button,
+    .st-itk-row>.st-itk-grow {
+        flex: 1 1 100%;
+    }
+
+    .st-itk-item .st-itk-sp {
+        margin-left: 0;
+        width: 100%;
+    }
+
+    .st-itk-item .st-itk-sp .menu_button {
+        flex: 1 1 40%;
+    }
+
+    .st-itk-list {
+        max-height: 240px;
+    }
+}
