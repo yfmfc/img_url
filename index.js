@@ -19,8 +19,6 @@ import {
     saveSettingsDebounced,
     getRequestHeaders,
     setExtensionPrompt,
-    extension_prompt_types,
-    extension_prompt_roles,
 } from '../../../../script.js';
 import { eventSource, event_types } from '../../../events.js';
 import { Popup, POPUP_TYPE } from '../../../popup.js';
@@ -32,7 +30,6 @@ import { Popup, POPUP_TYPE } from '../../../popup.js';
 const EXT_NAME = 'Image Toolkit';
 const EXT_ID = 'stImageToolkit';
 const MACRO_NAME = 'img';
-const INJECT_PREFIX = 'stItkImg_';
 const DB_NAME = 'st-image-toolkit';
 const DB_STORE = 'images';
 
@@ -44,7 +41,6 @@ const DEFAULT_SETTINGS = {
         quality: 0.85,          // 自动压缩质量
     },
     imageMeta: [],              // [{id, name, mime, bytes, width, height, created}]
-    injections: [],             // [{id, imageId, name, caption, position, depth, scan, role, enabled}]
     cleanup: {
         days: 30,
         mode: 'character',      // character | chat
@@ -127,6 +123,26 @@ function confirmPopup(text, okTitle = '确定') {
         wide: false,
     });
     return popup.show();
+}
+
+/** 点击缩略图预览大图（ST 原生弹窗，自带 X / ESC 退出） */
+function previewImage(dataUrl, name) {
+    const img = el('img', {
+        src: dataUrl, alt: name,
+        style: { maxWidth: '80vw', maxHeight: '72vh', display: 'block', margin: '0 auto', borderRadius: '8px' },
+    });
+    const wrap = el('div', {}, [
+        img,
+        el('div', { class: 'st-itk-hint', text: name, style: { textAlign: 'center', marginTop: '8px' } }),
+    ]);
+    new Popup(wrap, POPUP_TYPE.DISPLAY).show();
+}
+
+/** 让 textarea 滚动到指定字符位置附近 */
+function scrollTextareaTo(ta, index) {
+    const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || 16;
+    const lines = ta.value.slice(0, index).split('\n').length;
+    ta.scrollTop = Math.max(0, (lines - 3) * lineHeight);
 }
 
 function loadImageFromDataUrl(dataUrl) {
@@ -274,7 +290,6 @@ async function addImages(files) {
     }
     persist();
     renderImageList();
-    renderInjectionControls();
     return added;
 }
 
@@ -283,12 +298,8 @@ async function removeImage(meta) {
     try { legacyMacros?.unregisterMacro?.(`${MACRO_NAME}::${meta.name}`); } catch { /* ignore */ }
     await idbDelete(meta.id).catch(() => {});
     S().imageMeta = S().imageMeta.filter(x => x.id !== meta.id);
-    S().injections = S().injections.filter(x => x.imageId !== meta.id);
     persist();
-    applyInjections();
     renderImageList();
-    renderInjectionControls();
-    renderInjectionList();
 }
 
 // ---------------------------------------------------------------------------
@@ -464,48 +475,7 @@ function patchFetch() {
     };
 }
 
-// ---------------------------------------------------------------------------
-// 预处理注入（设想1）：位置 / 深度 / 角色，同世界书的插入方式
-// ---------------------------------------------------------------------------
-
-function injectionKey(id) {
-    return `${INJECT_PREFIX}${id}`;
-}
-
-function applyInjections() {
-    for (const inj of S().injections) {
-        const content = inj.enabled ? composeInjectionContent(inj) : '';
-        try {
-            setExtensionPrompt(
-                injectionKey(inj.id),
-                content,
-                Number(inj.position),
-                Number(inj.depth),
-                !!inj.scan,
-                Number(inj.role),
-            );
-        } catch (e) {
-            console.warn(`${EXT_NAME}: 注入失败`, inj.name, e);
-        }
-    }
-}
-
-function composeInjectionContent(inj) {
-    const entry = imageIndexByImageId(inj.imageId);
-    const parts = [];
-    if (entry) parts.push(`<img src="${entry.dataUrl}" alt="${inj.name || entry.name}">`);
-    if (inj.caption && String(inj.caption).trim()) parts.push(String(inj.caption).trim());
-    return parts.join('\n');
-}
-
-function imageIndexByImageId(id) {
-    for (const entry of imageIndex.values()) {
-        if (entry.id === id) return entry;
-    }
-    return null;
-}
-
-// ---------------------------------------------------------------------------
+// -+
 // 聊天记录清理
 // ---------------------------------------------------------------------------
 
@@ -860,7 +830,7 @@ async function runConvert(files) {
 
 const ui = {};
 
-function section(title, icon, buildBody) {
+function section(title, icon, buildBody, helpHtml) {
     const body = el('div', { class: 'st-itk-body', hidden: 'hidden' });
     const head = el('button', {
         class: 'st-itk-head', type: 'button', 'aria-expanded': 'false',
@@ -869,6 +839,18 @@ function section(title, icon, buildBody) {
         el('span', { text: title }),
         el('i', { class: 'fa-solid fa-chevron-down st-itk-chev' }),
     ]);
+    if (helpHtml) {
+        const help = el('div', { class: 'st-itk-hint st-itk-help', hidden: 'hidden', html: helpHtml });
+        const helpBtn = el('button', {
+            class: 'st-itk-help-btn', type: 'button', title: '功能说明', text: '说明',
+        });
+        helpBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            help.hidden = !help.hidden;
+        });
+        head.insertBefore(helpBtn, head.querySelector('.st-itk-chev'));
+        body.append(help);
+    }
     head.addEventListener('click', () => {
         const open = body.hidden;
         body.hidden = !open;
@@ -916,7 +898,6 @@ function buildImageListBody(body) {
     });
 
     body.append(
-        el('div', { class: 'st-itk-hint', html: '上传的图片可以用宏 <span class="st-itk-mono">{{img::图片名}}</span> 放进<b>世界书 / 角色描述 / 预设提示词 / 聊天</b>任意位置。发送请求时自动替换为真正的图片内容（支持视觉模型；Claude / Gemini / OpenRouter 等会自动转换）。' }),
         el('div', { class: 'st-itk-row' }, [
             el('button', { class: 'menu_button', type: 'button', text: '上传图片', onclick: () => uploadInput.click() }),
             uploadInput,
@@ -939,7 +920,12 @@ function renderImageList() {
     }
     for (const meta of metas) {
         const entry = imageIndex.get(meta.name);
-        const thumb = el('img', { class: 'st-itk-thumb', alt: meta.name, src: entry ? entry.dataUrl : '' });
+        const thumb = el('img', {
+            class: 'st-itk-thumb', alt: meta.name, src: entry ? entry.dataUrl : '',
+            title: '点击预览大图',
+            style: { cursor: 'pointer' },
+            onclick: () => entry && previewImage(entry.dataUrl, meta.name),
+        });
         const row = el('div', { class: 'st-itk-item' }, [
             thumb,
             el('div', {}, [
@@ -971,14 +957,12 @@ function renderImageList() {
                         } catch { /* ignore */ }
                         persist();
                         renderImageList();
-                        renderInjectionControls();
-                        renderInjectionList();
                     },
                 }),
                 el('button', {
                     class: 'menu_button', type: 'button', text: '删除',
                     onclick: async () => {
-                        const ok = await confirmPopup(el('div', { text: `删除图片「${meta.name}」？相关注入也会被移除。` }), '删除');
+                        const ok = await confirmPopup(el('div', { text: `删除图片「${meta.name}」？` }), '删除');
                         if (ok) await removeImage(meta);
                     },
                 }),
@@ -989,136 +973,7 @@ function renderImageList() {
 }
 
 function buildImageBody(body) {
-    // 方式一：图片库 + 宏
     buildImageListBody(body);
-    // 方式二：位置注入（与方式一同属一个功能，两种注入方式）
-    body.append(el('div', { class: 'st-itk-hint', html: '<b>方式二 · 位置注入：</b>像世界书一样指定插入位置/深度/角色，把图片 + 描述固定注入到提示词结构里（适合固定形象设定）。两种方式可同时使用。' }));
-    buildInjectionBody(body);
-}
-
-function buildInjectionBody(body) {
-    const imgSel = el('select', { class: 'text_pole st-itk-grow' });
-    const caption = el('textarea', { class: 'text_pole st-itk-panel-textarea', placeholder: '图片搭配的文字描述（可选，会与图片一起插入）' });
-    const posSel = el('select', { class: 'text_pole' }, [
-        el('option', { value: String(extension_prompt_types.IN_CHAT), text: '聊天内（按深度插入）' }),
-        el('option', { value: String(extension_prompt_types.IN_PROMPT), text: '主提示词内' }),
-        el('option', { value: String(extension_prompt_types.BEFORE_PROMPT), text: '主提示词前' }),
-    ]);
-    const depthInput = el('input', { class: 'text_pole st-itk-num', type: 'number', min: '0', max: '99', value: '4' });
-    const roleSel = el('select', { class: 'text_pole' }, [
-        el('option', { value: String(extension_prompt_roles.SYSTEM), text: 'system' }),
-        el('option', { value: String(extension_prompt_roles.USER), text: 'user' }),
-        el('option', { value: String(extension_prompt_roles.ASSISTANT), text: 'assistant' }),
-    ]);
-    const scanCheck = el('input', { type: 'checkbox' });
-    const addBtn = el('button', { class: 'menu_button', type: 'button', text: '添加注入' });
-    const list = el('div', { class: 'st-itk-list' });
-
-    ui.injectImgSel = imgSel;
-    ui.injectCaption = caption;
-    ui.injectPosSel = posSel;
-    ui.injectDepth = depthInput;
-    ui.injectRole = roleSel;
-    ui.injectScan = scanCheck;
-    ui.injectAddBtn = addBtn;
-    ui.injectList = list;
-
-    addBtn.addEventListener('click', () => {
-        const imageId = imgSel.value;
-        if (!imageId) { toast('warning', '请先上传并选择图片'); return; }
-        const entry = imageIndexByImageId(imageId);
-        const inj = {
-            id: uid(),
-            imageId,
-            name: entry ? entry.name : '图片',
-            caption: caption.value,
-            position: Number(posSel.value),
-            depth: Number(depthInput.value) || 0,
-            scan: scanCheck.checked,
-            role: Number(roleSel.value),
-            enabled: true,
-        };
-        S().injections.push(inj);
-        persist();
-        applyInjections();
-        renderInjectionList();
-        toast('success', `已添加注入：${inj.name}`);
-    });
-
-    body.append(
-        el('div', { class: 'st-itk-hint', text: '选择图片 + 可选描述 → 添加注入；下方列表可随时启用/停用/删除。若想手动控制位置请用方式一的宏。' }),
-        el('div', { class: 'st-itk-row' }, [
-            imgSel,
-            posSel,
-            el('label', { class: 'st-itk-check' }, [el('span', { text: '深度' }), depthInput]),
-            el('label', { class: 'st-itk-check' }, [el('span', { text: '角色' }), roleSel]),
-            el('label', { class: 'st-itk-check' }, [scanCheck, el('span', { text: '参与WI扫描' })]),
-            addBtn,
-        ]),
-        caption,
-        list,
-    );
-    renderInjectionControls();
-    renderInjectionList();
-}
-
-function renderInjectionControls() {
-    const sel = ui.injectImgSel;
-    if (!sel) return;
-    const current = sel.value;
-    sel.textContent = '';
-    sel.append(el('option', { value: '', text: '— 选择图片 —' }));
-    for (const meta of S().imageMeta) {
-        sel.append(el('option', { value: meta.id, text: meta.name }));
-    }
-    if (current && S().imageMeta.some(x => x.id === current)) sel.value = current;
-}
-
-function renderInjectionList() {
-    const list = ui.injectList;
-    if (!list) return;
-    list.textContent = '';
-    const injections = S().injections;
-    if (!injections.length) {
-        list.append(el('div', { class: 'st-itk-hint', text: '暂无注入项。' }));
-        return;
-    }
-    const posLabel = (p) => ({
-        [extension_prompt_types.IN_CHAT]: '聊天内',
-        [extension_prompt_types.IN_PROMPT]: '主提示词内',
-        [extension_prompt_types.BEFORE_PROMPT]: '主提示词前',
-    })[p] ?? String(p);
-    for (const inj of injections) {
-        const toggleBtn = el('button', {
-            class: 'menu_button', type: 'button', text: inj.enabled ? '停用' : '启用',
-        });
-        toggleBtn.addEventListener('click', () => {
-            inj.enabled = !inj.enabled;
-            persist();
-            applyInjections();
-            renderInjectionList();
-        });
-        list.append(el('div', { class: `st-itk-item${inj.enabled ? '' : ' st-itk-disabled'}` }, [
-            el('div', {}, [
-                el('div', { class: 'st-itk-name', text: `${inj.name}${inj.caption ? ' + 文字描述' : ''}` }),
-                el('div', { class: 'st-itk-meta', text: `${posLabel(inj.position)} · 深度 ${inj.depth} · ${['system', 'user', 'assistant'][inj.role] || inj.role}${inj.scan ? ' · WI扫描' : ''}` }),
-            ]),
-            el('div', { class: 'st-itk-sp' }, [
-                toggleBtn,
-                el('button', {
-                    class: 'menu_button', type: 'button', text: '删除',
-                    onclick: async () => {
-                        const ok = await confirmPopup(el('div', { text: `删除注入「${inj.name}」？` }), '删除');
-                        if (!ok) return;
-                        try { setExtensionPrompt(injectionKey(inj.id), '', 0, 0, false, extension_prompt_roles.SYSTEM); } catch { /* ignore */ }
-                        S().injections = S().injections.filter(x => x.id !== inj.id);
-                        persist();
-                        renderInjectionList();
-                    },
-                }),
-            ]),
-        ]));
-    }
 }
 
 function buildCleanupBody(body) {
@@ -1152,7 +1007,6 @@ function buildCleanupBody(body) {
     }));
 
     body.append(
-        el('div', { class: 'st-itk-hint', text: '扫描最后聊天时间早于 N 天的角色卡及其聊天记录，勾选后批量删除。当前打开的聊天不会被删除。删除不可恢复，谨慎操作。' }),
         el('div', { class: 'st-itk-row' }, [
             el('label', { class: 'st-itk-check' }, [el('span', { text: '距今 ≥' }), daysInput, el('span', { text: '天' })]),
             modeSel,
@@ -1170,12 +1024,12 @@ function buildCleanupBody(body) {
 }
 
 function buildPresetBody(body) {
-    const input = el('textarea', { class: 'text_pole st-itk-panel-textarea tall', placeholder: '在此粘贴原始 Preset JSON，或点击“选择 .json 文件”上传' });
+    const input = el('textarea', { class: 'text_pole st-itk-panel-textarea tall', placeholder: '在此粘贴或编辑 JSON（可直接手动修改），也可点“上传”载入 .json 文件' });
     const output = el('textarea', { class: 'text_pole st-itk-panel-textarea tall', placeholder: '整理结果会显示在这里' });
     const indentSel = el('select', { class: 'text_pole' }, [
-        el('option', { value: '2', text: '缩进 2 空格' }),
-        el('option', { value: '4', text: '缩进 4 空格' }),
-        el('option', { value: '0', text: '紧凑（不换行）' }),
+        el('option', { value: '2', text: '缩进 2' }),
+        el('option', { value: '4', text: '缩进 4' }),
+        el('option', { value: '0', text: '紧凑' }),
     ]);
     const status = el('div', { class: 'st-itk-status' });
     ui.presetInput = input;
@@ -1192,22 +1046,78 @@ function buildPresetBody(body) {
         }
     });
 
+    // ---- 查找 / 替换（默认收纳，点按钮展开）----
+    const findInput = el('input', { class: 'text_pole st-itk-grow', type: 'text', placeholder: '查找内容' });
+    const replInput = el('input', { class: 'text_pole st-itk-grow', type: 'text', placeholder: '替换为' });
+    const frStatus = el('span', { class: 'st-itk-status' });
+
+    function findNext() {
+        const q = findInput.value;
+        if (!q) { frStatus.textContent = '输入查找内容'; return; }
+        const text = input.value;
+        const from = Math.max(input.selectionEnd ?? 0, 0);
+        let idx = text.indexOf(q, from);
+        if (idx < 0) idx = text.indexOf(q); // 回绕到开头
+        if (idx < 0) { frStatus.textContent = '未找到'; return; }
+        input.focus();
+        input.setSelectionRange(idx, idx + q.length);
+        scrollTextareaTo(input, idx);
+        frStatus.textContent = `命中 #${text.slice(0, idx).split(q).length} · 位置 ${idx}`;
+    }
+
+    function replaceOne() {
+        const q = findInput.value;
+        if (!q) { frStatus.textContent = '输入查找内容'; return; }
+        const selStart = input.selectionStart ?? 0;
+        const selEnd = input.selectionEnd ?? 0;
+        if (input.value.slice(selStart, selEnd) === q) {
+            input.setRangeText(replInput.value, selStart, selEnd, 'end');
+            frStatus.textContent = '已替换 1 处，继续查找下一处';
+        }
+        findNext();
+    }
+
+    function replaceAll() {
+        const q = findInput.value;
+        if (!q) { frStatus.textContent = '输入查找内容'; return; }
+        const count = input.value.split(q).length - 1;
+        if (!count) { frStatus.textContent = '未找到'; return; }
+        input.value = input.value.split(q).join(replInput.value);
+        frStatus.textContent = `已全部替换 ${count} 处`;
+    }
+
+    const frRow = el('div', { class: 'st-itk-row', hidden: 'hidden' }, [
+        findInput,
+        replInput,
+        el('button', { class: 'menu_button', type: 'button', text: '下一处', onclick: () => findNext() }),
+        el('button', { class: 'menu_button', type: 'button', text: '替换', onclick: replaceOne }),
+        el('button', { class: 'menu_button', type: 'button', text: '全部替换', onclick: replaceAll }),
+        frStatus,
+    ]);
+
+    const frToggle = el('button', { class: 'menu_button', type: 'button', text: '查找/替换' });
+    frToggle.addEventListener('click', () => {
+        frRow.hidden = !frRow.hidden;
+        if (!frRow.hidden) findInput.focus();
+    });
+
     body.append(
-        el('div', { class: 'st-itk-hint', html: '只做一件事：按 <span class="st-itk-mono">prompt_order</span> 的 ID 顺序重排 <span class="st-itk-mono">prompts</span> 数组，其他任何数据（含字段顺序）原样保留。' }),
         el('div', { class: 'st-itk-row' }, [
-            el('button', { class: 'menu_button', type: 'button', text: '选择 .json 文件', onclick: () => fileInput.click() }),
+            el('button', { class: 'menu_button', type: 'button', text: '上传', onclick: () => fileInput.click() }),
             fileInput,
-            indentSel,
             el('button', { class: 'menu_button', type: 'button', text: '整理', onclick: doOrganizePreset }),
-            el('button', { class: 'menu_button', type: 'button', text: '复制结果', onclick: () => output.value && copyText(output.value) }),
+            indentSel,
+            el('button', { class: 'menu_button', type: 'button', text: '复制', onclick: () => output.value && copyText(output.value) }),
             el('button', {
-                class: 'menu_button', type: 'button', text: '导出 .json',
+                class: 'menu_button', type: 'button', text: '导出',
                 onclick: () => {
                     if (!output.value) { toast('warning', '没有可导出的结果'); return; }
                     downloadText('preset-organized.json', output.value);
                 },
             }),
+            frToggle,
         ]),
+        frRow,
         status,
         input,
         output,
@@ -1236,7 +1146,6 @@ function buildConvertBody(body) {
     const fileInput = filePicker('image/*', true, (files) => runConvert(files).catch(e => toast('error', e.message)));
 
     body.append(
-        el('div', { class: 'st-itk-hint', text: 'JPG / PNG 互转。质量调节对 JPG 有效（PNG 为无损格式）；缩放对两者都有效。' }),
         el('div', { class: 'st-itk-row' }, [
             el('button', { class: 'menu_button', type: 'button', text: '选择图片', onclick: () => fileInput.click() }),
             fileInput,
@@ -1262,10 +1171,14 @@ function buildUi() {
 
     // 内部四个功能区（默认收纳，点顶部按钮展开）
     const inner = el('div', { class: 'st-itk-body', hidden: 'hidden' }, [
-        section('聊天记录清理', 'fa-solid fa-broom', buildCleanupBody),
-        section('图片插入（宏 / 位置注入）', 'fa-solid fa-image', buildImageBody),
-        section('Preset JSON 整理器', 'fa-solid fa-list-ordered', buildPresetBody),
-        section('图片格式转换', 'fa-solid fa-file-image', buildConvertBody),
+        section('聊天记录清理', 'fa-solid fa-broom', buildCleanupBody,
+            '扫描最后聊天时间早于 N 天的角色卡及其聊天记录，勾选后批量删除。<b>当前打开的聊天会自动跳过</b>；删除不可恢复，建议先自行备份。支持按“角色最后聊天时间”或“每条聊天最后消息时间”两种口径过滤。'),
+        section('图片插入（宏）', 'fa-solid fa-image', buildImageBody,
+            '上传图片后点“复制宏”得到 <span class="st-itk-mono">{{img::图片名}}</span>，粘贴到<b>世界书 / 角色描述 / 预设提示词 / 聊天</b>任意位置，发请求时自动替换为真正的图片内容（支持视觉模型，Claude / Gemini / OpenRouter 自动转换；不支持图片的 API 自动降级为文字）。<b>点击缩略图可预览大图</b>。'),
+        section('Preset JSON 整理器', 'fa-solid fa-list-ordered', buildPresetBody,
+            '整理：按 <span class="st-itk-mono">prompt_order</span> 的 ID 顺序重排 <span class="st-itk-mono">prompts</span> 数组，其他任何数据（含字段顺序）原样保留。输入框可直接编辑 JSON，点“查找/替换”展开搜索工具（支持下一处 / 替换 / 全部替换）。'),
+        section('图片格式转换', 'fa-solid fa-file-image', buildConvertBody,
+            'JPG / PNG 互转。质量调节对 JPG 有效（PNG 为无损格式）；缩放对两者都有效。透明背景转 JPG 会自动铺白底。'),
     ]);
 
     // 顶部收纳按钮：整个插件的总开关式折叠
@@ -1274,7 +1187,7 @@ function buildUi() {
     }, [
         el('i', { class: 'fa-solid fa-toolbox' }),
         el('span', { text: EXT_NAME }),
-        el('span', { class: 'st-itk-ver', text: 'v1.1.0' }),
+        el('span', { class: 'st-itk-ver', text: '正式版 2.1' }),
         el('i', { class: 'fa-solid fa-chevron-down st-itk-chev' }),
     ]);
     topHead.addEventListener('click', () => {
@@ -1298,7 +1211,7 @@ async function init() {
     inited = true;
     try { S(); } catch { /* ignore */ }
 
-    // 1) 图片库载入内存（宏 / 注入的数据源）
+    // 1) 图片库载入内存（宏的数据源）
     try {
         for (const meta of S().imageMeta.slice()) {
             const dataUrl = await idbGet(meta.id);
@@ -1327,8 +1240,20 @@ async function init() {
         openaiMod = await import('../../../openai.js');
     } catch { /* ignore */ }
 
-    // 5) 注入 & UI
-    applyInjections();
+    // 5) 兼容清理：旧版“位置注入”已移除，清掉遗留的提示词注入并删除旧设置
+    try {
+        const legacyInjections = (extension_settings[EXT_ID] || {}).injections;
+        if (Array.isArray(legacyInjections)) {
+            for (const inj of legacyInjections) {
+                if (inj && inj.id) {
+                    try { setExtensionPrompt(`stItkImg_${inj.id}`, '', 0, 0, false, 0); } catch { /* ignore */ }
+                }
+            }
+        }
+    } catch { /* ignore */ }
+    delete S().injections;
+
+    // 6) UI
     buildUi();
     eventSource.on(event_types.APP_READY, () => buildUi());
 

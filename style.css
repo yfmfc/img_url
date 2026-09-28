@@ -66,6 +66,35 @@
     opacity: .7;
 }
 
+/* 功能说明收纳按钮（在每个功能标题栏里，不占额外行） */
+.st-itk-help-btn {
+    margin-left: auto;
+    font-size: 0.72em;
+    padding: 2px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    background: transparent;
+    color: var(--SmartThemeBodyColor);
+    opacity: .8;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.st-itk-help-btn:hover {
+    opacity: 1;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 12%, transparent);
+}
+
+.st-itk-head .st-itk-help-btn+.st-itk-chev {
+    margin-left: 8px;
+}
+
+.st-itk-help {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 6%, transparent);
+    padding: 7px 9px;
+    border-radius: 8px;
+}
+
 .st-itk-head[aria-expanded="true"] .st-itk-chev {
     transform: rotate(180deg);
 }
@@ -160,6 +189,7 @@
     border-radius: 6px;
     border: 1px solid var(--SmartThemeBorderColor);
     flex: 0 0 auto;
+    cursor: pointer;
 }
 
 .st-itk-item .st-itk-name {
