@@ -1,8 +1,7 @@
-# Image Toolkit —— SillyTavern 图片工具箱扩展
+# Image Toolkit v2.3.0 —— SillyTavern 图片工具箱
 
-一个不带独立悬浮窗、不写自定义 HTML 界面的 SillyTavern 插件。
-面板挂在 SillyTavern 自带的「扩展设置」抽屉里，全部控件使用 ST 原生按钮/输入框样式和主题变量，
-自动跟随你当前的 SillyTavern 主题，手机端自适应。
+一个不带独立悬浮窗的 SillyTavern 插件。面板挂在 SillyTavern 自带的「扩展设置」抽屉里，
+全部控件使用 ST 原生按钮 / 输入框样式和主题变量，自动跟随当前主题，手机端自适应。
 
 **整个插件就是一个收纳按钮**：默认只显示一行「Image Toolkit」，点开才显示 4 个功能区；
 每个功能区再点击展开具体控件，不占屏幕空间。
@@ -35,16 +34,25 @@
 1. 「图片插入」→「上传图片」（可多选；默认自动压缩到 1280px）
 2. 点「复制宏」得到 `{{img::图片名}}`
 3. 把宏粘贴到**任意位置**：世界书条目、角色描述/人设、预设提示词、聊天记录……
-4. 发送请求时，宏会被替换成真正的图片内容，随请求一起发给多模态 API
+4. 发送请求时，宏解析为和 SillyTavern 原生图片附件**完全相同**的图片内容块（`image_url`），
+   随请求发给 API；Claude（base64 image block）/ Gemini（inlineData）/ OpenRouter 等
+   各家格式由 SillyTavern 服务端自动转换
 5. **点击缩略图可预览大图**，右上角 X 或 ESC 退出预览
 
-原理：请求发出前把 `<img src="data:...">` 转成 API 标准的 `image_url` 内容块，
-SillyTavern 服务端会自动转换成 Claude（base64 image block）/ Gemini（inlineData）/ OpenRouter 等各家格式。
-文本补全类 API 不支持图片，会自动降级为 `[图片: 名称]` 文字，不会把 base64 灌进提示词。
+### 发送模式
 
-- 「启用宏替换」开关：关掉后宏输出为空（省 token）
-- 支改名、删除
-- ⚠️ 需要使用支持视觉的模型；若 ST 的「媒体内联」关闭或 API 不支持图片，自动降级为文字
+- **发送图片**（默认）：发送真正的图片内容块，模型直接看到图片
+- **输出文字标记**：输出 `[图片: 名称]`，适合纯文本模型
+- **停用宏输出**：宏输出为空
+
+### 实现说明
+
+- 宏展开时只写入一个几十字节的占位符，**base64 不进提示词**：
+  不占文本 token、不影响上下文统计，一张图按图片计费（约几百 token）
+- 通过 SillyTavern 官方请求事件（`CHAT_COMPLETION_PROMPT_READY` /
+  `GENERATE_AFTER_COMBINE_PROMPTS`）在请求组装完成时解析占位符，不拦截网络层
+- 纯文本补全 API 不承载图片，图片以文字标记呈现
+- 支改名、删除；图片本体存在浏览器 IndexedDB，不占设置文件体积
 
 ## 功能三：Preset JSON 编辑 / 整理器
 

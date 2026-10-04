@@ -1,24 +1,21 @@
 /**
- * Image Toolkit —— SillyTavern 功能扩展
+ * Image Toolkit —— SillyTavern 图片工具箱
  *
  * 功能：
  *   1. 聊天记录清理：按“最后聊天时间距今 N 天”扫描角色卡并批量删除聊天
- *   2. 图片插入：
- *      - 图片库 + 宏 {{img::图片名}}：放在任意位置（世界书/角色描述/预设/聊天），
- *        发送请求时自动替换为真正的图片内容（随请求发给多模态 API）
- *      - 预处理注入：像世界书一样选择插入位置/深度/角色 + 文字描述
+ *   2. 图片插入：图片库 + 宏 {{img::图片名}}，放在世界书 / 角色描述 / 预设 / 聊天的任意位置，
+ *      请求发出时解析为图片内容块，让模型直接看到图片
  *   3. Preset JSON 整理器：按 prompt_order 的顺序重排 prompts 数组，其余原样保留
- *   4. 图片格式转换：JPG / PNG 互转 + 手动质量/缩放压缩
+ *   4. 图片格式转换：JPG / PNG 互转 + 质量 / 缩放压缩
  *
- * 不做独立悬浮窗，面板挂载在 SillyTavern 自带的扩展设置抽屉里，
- * 全部控件使用 SillyTavern 原生样式类 + 主题变量，自动跟随用户主题。
+ * 界面挂载在 SillyTavern 的扩展设置抽屉里，全部控件使用原生样式类与主题变量，
+ * 自动跟随当前主题，移动端自适应。
  */
 
 import { extension_settings, getContext } from '../../../extensions.js';
 import {
     saveSettingsDebounced,
     getRequestHeaders,
-    setExtensionPrompt,
 } from '../../../../script.js';
 import { eventSource, event_types } from '../../../events.js';
 import { Popup, POPUP_TYPE } from '../../../popup.js';
@@ -35,15 +32,15 @@ const DB_STORE = 'images';
 
 const DEFAULT_SETTINGS = {
     images: {
-        enabled: true,          // 宏替换总开关
+        mode: 'image',          // 发送模式：image=发送图片内容块 | text=输出文字标记 | off=宏输出为空
         autoCompress: true,     // 上传时自动压缩
         maxEdge: 1280,          // 自动压缩最长边
         quality: 0.85,          // 自动压缩质量
     },
-    imageMeta: [],              // [{id, name, mime, bytes, width, height, created}]
+    imageMeta: [],              // 图片元数据 [{id, name, mime, bytes, width, height, created}]
     cleanup: {
         days: 30,
-        mode: 'character',      // character | chat
+        mode: 'character',      // character=按角色最后聊天时间 | chat=按每条聊天最后消息时间
     },
     convert: {
         format: 'image/jpeg',
@@ -52,7 +49,7 @@ const DEFAULT_SETTINGS = {
     },
 };
 
-/** 保证 extension_settings.imageToolkit 存在且字段齐全（设置被外部覆盖也能自愈） */
+/** 读取设置并补齐缺失字段，保证默认值始终可用 */
 function S() {
     const root = extension_settings[EXT_ID] ?? (extension_settings[EXT_ID] = {});
     for (const [key, def] of Object.entries(DEFAULT_SETTINGS)) {
@@ -164,7 +161,7 @@ function readFileAsDataURL(file) {
 }
 
 // ---------------------------------------------------------------------------
-// IndexedDB：图片本体存储（不塞 localStorage，避免配额爆掉）
+// IndexedDB：图片本体存储（大图存数据库，设置文件保持轻量）
 // ---------------------------------------------------------------------------
 
 let dbPromise = null;
@@ -217,7 +214,7 @@ async function idbDelete(id) {
 // 图片库（宏的数据源）
 // ---------------------------------------------------------------------------
 
-/** name -> {id, name, dataUrl} */
+/** 图片索引：名称 → {id, name, dataUrl} */
 const imageIndex = new Map();
 
 function indexImage(meta, dataUrl) {
@@ -281,7 +278,6 @@ async function addImages(files) {
             await idbPut(meta.id, norm.dataUrl);
             S().imageMeta.push(meta);
             indexImage(meta, norm.dataUrl);
-            if (typeof legacyMacros?.syncImageMacros === 'function') legacyMacros.syncImageMacros();
             added.push(meta);
         } catch (e) {
             console.error(EXT_NAME, e);
@@ -295,7 +291,6 @@ async function addImages(files) {
 
 async function removeImage(meta) {
     unindexImage(meta.name);
-    try { legacyMacros?.unregisterMacro?.(`${MACRO_NAME}::${meta.name}`); } catch { /* ignore */ }
     await idbDelete(meta.id).catch(() => {});
     S().imageMeta = S().imageMeta.filter(x => x.id !== meta.id);
     persist();
@@ -303,66 +298,77 @@ async function removeImage(meta) {
 }
 
 // ---------------------------------------------------------------------------
-// 宏系统：{{img::图片名}} → <img src="data:...">
+// 图片宏：{{img::图片名}} → 提示词中的图片占位符
 // ---------------------------------------------------------------------------
+//
+// 数据流：宏展开只写入极小的占位符 <img data-itk="图片名">，base64 全程不进
+// 提示词；请求组装完成时，占位符被解析为与原生图片附件一致的图片内容块。
 
-let macrosApi = null;      // 新版宏引擎 (macros/macro-system.js)
-let legacyMacros = null;   // 旧版 MacrosParser 兜底
+let macroApi = null;
 
-function buildImgTag(name) {
-    if (S().images.enabled === false) return '';
+/** 按当前发送模式生成宏输出 */
+function buildMacroOutput(name) {
     const key = String(name || '').trim();
-    const entry = imageIndex.get(key);
-    if (!entry) {
+    const mode = S().images.mode;
+    if (mode === 'off') return '';
+    if (!imageIndex.has(key)) {
         console.warn(`${EXT_NAME}: 未找到图片 "${key}"`);
         return '';
     }
-    return `<img src="${entry.dataUrl}" alt="${key}">`;
+    if (mode === 'text') return `[图片: ${key}]`;
+    return `<img data-itk="${key}" alt="${key}">`;
 }
 
-function registerMacro() {
-    const argDef = [{ name: 'name', optional: false, sampleValue: '角色立绘', description: '图片库中的图片名' }];
-    if (macrosApi && typeof macrosApi.register === 'function') {
-        try {
-            macrosApi.register(MACRO_NAME, {
-                category: macrosApi.category?.CORE ?? 'core',
-                description: '把图片库中的图片注入到提示词（请求发出时替换为图片内容）',
-                displayOverride: '{{img::图片名}}',
-                exampleUsage: ['{{img::角色立绘}}'],
-                unnamedArgs: argDef,
-                handler: (ctx) => buildImgTag(ctx?.unnamedArgs?.[0] ?? ctx?.args?.[0] ?? ''),
-            });
-            console.log(`${EXT_NAME}: 已注册宏 {{img::图片名}}`);
-            return;
-        } catch (e) {
-            console.warn(`${EXT_NAME}: 新版宏注册失败，尝试旧版`, e);
-        }
+/** 向 SillyTavern 宏引擎注册 {{img::图片名}} */
+async function registerImageMacro() {
+    try {
+        const mod = await import('../../../macros/macro-system.js');
+        macroApi = mod.macros || null;
+    } catch { /* 当前环境未提供宏引擎 */ }
+    if (typeof macroApi?.register !== 'function') {
+        console.error(`${EXT_NAME}: 未找到宏引擎 macros/macro-system.js，请升级 SillyTavern`);
+        toast('error', '未找到宏引擎，请升级 SillyTavern');
+        return;
     }
-    if (legacyMacros && typeof legacyMacros.registerMacro === 'function') {
-        // 旧版引擎：为每张图片注册精确宏 {{img::名称}}
-        const sync = () => {
-            for (const [name, entry] of imageIndex) {
-                try { legacyMacros.registerMacro(`${MACRO_NAME}::${name}`, `<img src="${entry.dataUrl}" alt="${name}">`); } catch { /* ignore */ }
-            }
-        };
-        sync();
-        legacyMacros.syncImageMacros = sync;
-        console.log(`${EXT_NAME}: 已按旧版宏引擎注册图片宏`);
+    try {
+        macroApi.register(MACRO_NAME, {
+            category: macroApi.category?.CORE ?? 'core',
+            description: '把图片库中的图片插入提示词（请求发出时解析为图片内容块）',
+            displayOverride: '{{img::图片名}}',
+            exampleUsage: ['{{img::角色立绘}}'],
+            unnamedArgs: [{ name: 'name', optional: false, sampleValue: '角色立绘', description: '图片库中的图片名' }],
+            handler: (ctx) => buildMacroOutput(ctx?.unnamedArgs?.[0] ?? ctx?.args?.[0] ?? ''),
+        });
+        console.log(`${EXT_NAME}: 宏 {{img::图片名}} 注册完成`);
+    } catch (e) {
+        console.error(`${EXT_NAME}: 宏注册失败`, e);
     }
 }
 
 // ---------------------------------------------------------------------------
-// 请求拦截：把提示词里的 <img src="data:..."> 真正变成 API 的图片内容
-// （SillyTavern 服务端原生支持 image_url 内容块，可自动转换到 Claude/Gemini/OpenRouter 等）
+// 请求改写：占位符 → 图片内容块
 // ---------------------------------------------------------------------------
+//
+// 通过 SillyTavern 官方事件在请求组装完成时改写，图片内容块与原生附件同构
+// （{type:'image_url', image_url:{url}}），服务端自动适配各家 API 格式。
 
-const IMG_TAG_RE = /<img\b[^>]*?\bsrc\s*=\s*["'](data:image\/[^"']+)["'][^>]*>/gi;
+/** 匹配图片占位符：<img data-itk="图片名"> */
+const PLACEHOLDER_RE = /<img\b[^>]*\bdata-itk\s*=\s*["'][^"']*["'][^>]*>/gi;
 
-function getAlt(tagHtml) {
-    const m = /\balt\s*=\s*["']([^"']*)["']/i.exec(tagHtml);
+/** 读取 img 标签的属性值 */
+function getAttr(tagHtml, attr) {
+    const m = new RegExp(`\\b${attr}\\s*=\\s*["']([^"']*)["']`, 'i').exec(tagHtml);
     return m ? m[1] : '';
 }
 
+/** 按名称查询图片地址，命中返回 {url, name}，否则返回 null */
+function resolveImageRef(tagHtml) {
+    const name = getAttr(tagHtml, 'data-itk').trim();
+    const entry = name ? imageIndex.get(name) : null;
+    return entry?.dataUrl ? { url: entry.dataUrl, name } : null;
+}
+
+/** 合并相邻文本块，过滤空文本 */
 function mergeTextParts(parts) {
     const out = [];
     for (const p of parts) {
@@ -373,16 +379,21 @@ function mergeTextParts(parts) {
     return out.filter(p => p.type !== 'text' || p.text.length);
 }
 
-/** 文本 → [text, image_url, text, ...]；没有图片标记时返回 null */
-function splitTextWithImages(text) {
-    if (typeof text !== 'string' || !text.includes('data:image/')) return null;
+/** 文本中的占位符 → 图片内容块；没有占位符时返回 null */
+function splitImageTags(text) {
+    if (typeof text !== 'string' || !text.includes('data-itk')) return null;
     const parts = [];
-    const re = new RegExp(IMG_TAG_RE.source, 'gi');
+    const re = new RegExp(PLACEHOLDER_RE.source, 'gi');
     let last = 0;
     let m;
     while ((m = re.exec(text)) !== null) {
+        const ref = resolveImageRef(m[0]);
+        const name = ref?.name || getAttr(m[0], 'data-itk').trim();
         if (m.index > last) parts.push({ type: 'text', text: text.slice(last, m.index) });
-        parts.push({ type: 'image_url', image_url: { url: m[1] } });
+        // 命中图片库 → 图片内容块；图片已不存在 → 文字标记
+        parts.push(ref
+            ? { type: 'image_url', image_url: { url: ref.url } }
+            : { type: 'text', text: `[图片: ${name}]` });
         last = m.index + m[0].length;
     }
     if (!parts.length) return null;
@@ -390,24 +401,32 @@ function splitTextWithImages(text) {
     return mergeTextParts(parts);
 }
 
-/** 非多模态场景：把 img 标签替换成 alt 文本，避免 base64 污染提示词 */
-function stripImagesToAlt(text) {
-    return text.replace(new RegExp(IMG_TAG_RE.source, 'gi'), (_m, _src, ...rest) => {
-        const tag = _m;
-        const alt = getAlt(tag);
-        return alt ? `[图片: ${alt}]` : '';
+/** 文本中的占位符 → [图片: 名称] 文字标记 */
+function replaceWithMarkers(text) {
+    return text.replace(new RegExp(PLACEHOLDER_RE.source, 'gi'), (tag) => {
+        const name = getAttr(tag, 'data-itk').trim();
+        return name ? `[图片: ${name}]` : '[图片]';
     });
 }
 
-function transformContent(content) {
-    if (typeof content === 'string') return splitTextWithImages(content);
+/**
+ * 改写消息内容，返回新内容（无改动返回 null）。
+ * image 模式 → 图片内容块；text 模式 → [图片: 名称] 文字标记。
+ */
+function transformMessageContent(content, mode) {
+    if (typeof content === 'string') {
+        if (!content.includes('data-itk')) return null;
+        return mode === 'image' ? splitImageTags(content) : replaceWithMarkers(content);
+    }
     if (Array.isArray(content)) {
         let changed = false;
         const out = [];
         for (const part of content) {
-            if (part && part.type === 'text' && typeof part.text === 'string') {
-                const split = splitTextWithImages(part.text);
-                if (split) { out.push(...split); changed = true; continue; }
+            if (part && part.type === 'text' && typeof part.text === 'string' && part.text.includes('data-itk')) {
+                const next = mode === 'image'
+                    ? splitImageTags(part.text)
+                    : [{ type: 'text', text: replaceWithMarkers(part.text) }];
+                if (next) { out.push(...next); changed = true; continue; }
             }
             out.push(part);
         }
@@ -416,66 +435,59 @@ function transformContent(content) {
     return null;
 }
 
-let openaiMod = null; // 用于读取 ST 自带的“媒体内联”状态
-
-function imagesAllowedNow() {
-    try {
-        if (typeof openaiMod?.isImageInliningSupported === 'function') {
-            return !!openaiMod.isImageInliningSupported();
-        }
-    } catch { /* ignore */ }
-    return true;
+/** 改写一批聊天消息，返回改写条数 */
+function transformChatMessages(chat) {
+    if (!Array.isArray(chat)) return 0;
+    const mode = S().images.mode === 'image' ? 'image' : 'text';
+    let count = 0;
+    for (const msg of chat) {
+        if (!msg) continue;
+        const next = transformMessageContent(msg.content, mode);
+        if (next !== null) { msg.content = next; count++; }
+    }
+    return count;
 }
 
-function patchFetch() {
-    const origFetch = window.fetch.bind(window);
-    window.fetch = async (input, init) => {
+/**
+ * 挂接 SillyTavern 官方请求流水线事件：
+ *   - CHAT_COMPLETION_PROMPT_READY：聊天补全请求的 messages
+ *   - GENERATE_AFTER_COMBINE_PROMPTS：纯文本补全请求的 prompt
+ * 两类请求全覆盖，图片只出现在图片内容块或文字标记里。
+ */
+function hookRequestPipeline() {
+    const ready = event_types?.CHAT_COMPLETION_PROMPT_READY;
+    const combined = event_types?.GENERATE_AFTER_COMBINE_PROMPTS;
+    if (typeof eventSource?.on !== 'function' || !ready || !combined) {
+        console.error(`${EXT_NAME}: 未找到 SillyTavern 请求事件，请升级 SillyTavern`);
+        toast('error', '未找到请求事件，请升级 SillyTavern');
+        return;
+    }
+
+    // 聊天补全：占位符解析为图片内容块
+    eventSource.on(ready, (eventData) => {
         try {
-            const url = typeof input === 'string' ? input : (input && input.url) || '';
-            const body = init && typeof init.body === 'string' ? init.body : null;
-            if (body && body.includes('data:image/') && S().images.enabled) {
-                const isChatCompletion = url.includes('/api/chat-completion');
-                const isTextGen = url.includes('text-completions') || url.includes('/api/ai/');
-                if (isChatCompletion || isTextGen) {
-                    let data;
-                    try { data = JSON.parse(body); } catch { data = null; }
-                    if (data) {
-                        let touched = false;
-                        const imagesOk = imagesAllowedNow();
-                        if (isChatCompletion && Array.isArray(data.messages)) {
-                            for (const msg of data.messages) {
-                                if (!msg) continue;
-                                const result = imagesOk ? transformContent(msg.content) : null;
-                                if (result) {
-                                    msg.content = result;
-                                    touched = true;
-                                } else if (!imagesOk && typeof msg.content === 'string' && msg.content.includes('data:image/')) {
-                                    msg.content = stripImagesToAlt(msg.content);
-                                    touched = true;
-                                }
-                            }
-                        } else if (isTextGen) {
-                            for (const key of ['prompt', 'quiet_prompt', 'instruction', 'negative_prompt', 'memory']) {
-                                if (typeof data[key] === 'string' && data[key].includes('data:image/')) {
-                                    data[key] = stripImagesToAlt(data[key]);
-                                    touched = true;
-                                }
-                            }
-                        }
-                        if (touched) {
-                            init = { ...init, body: JSON.stringify(data) };
-                        }
-                    }
-                }
+            if (eventData?.dryRun) return;
+            const count = transformChatMessages(eventData?.chat);
+            if (count) console.log(`${EXT_NAME}: 已为 ${count} 条消息解析图片内容块`);
+        } catch (e) {
+            console.warn(`${EXT_NAME}: 改写聊天消息时出现问题`, e);
+        }
+    });
+
+    // 纯文本补全：图片以文字标记呈现（纯文本 API 本身不承载图片）
+    eventSource.on(combined, (eventData) => {
+        try {
+            if (eventData?.dryRun) return;
+            if (typeof eventData?.prompt === 'string' && eventData.prompt.includes('data-itk')) {
+                eventData.prompt = replaceWithMarkers(eventData.prompt);
             }
         } catch (e) {
-            console.warn(`${EXT_NAME}: 请求改写失败（已原样发送）`, e);
+            console.warn(`${EXT_NAME}: 改写文本提示词时出现问题`, e);
         }
-        return origFetch(input, init);
-    };
+    });
 }
 
-// -+
+// ---------------------------------------------------------------------------
 // 聊天记录清理
 // ---------------------------------------------------------------------------
 
@@ -508,7 +520,7 @@ async function scanOldChats() {
     }
 
     const candidates = (Array.isArray(chars) ? chars : []).filter(c => {
-        if (!c || !c.avatar || !Number(c.date_last_chat)) return false; // 没有聊天的角色
+        if (!c || !c.avatar || !Number(c.date_last_chat)) return false; // 跳过没有聊天记录的角色
         return mode === 'character' ? Number(c.date_last_chat) < cutoff : true;
     });
 
@@ -596,7 +608,7 @@ function renderCleanupResult(groups, cutoff) {
     box._collectChecked = () => {
         const targets = [];
         const items = box.querySelectorAll('.st-itk-sub .st-itk-item');
-        // 每个聊天行与 group 顺序对应：通过 DOM 内容回查
+        // 聊天行与勾选组按 DOM 顺序一一对应
         let idx = 0;
         for (const g of groups) {
             for (const ch of g.chats) {
@@ -644,7 +656,7 @@ async function deleteSelectedChats() {
         try {
             await apiPost('/api/chats/delete', { avatar_url: t.avatar_url, chatfile: t.chatfile });
             done++;
-            try { await eventSource.emit(event_types.CHAT_DELETED, t.file_id); } catch { /* ignore */ }
+            try { await eventSource.emit(event_types.CHAT_DELETED, t.file_id); } catch { /* 忽略 */ }
         } catch (e) {
             failed++;
             console.warn(`${EXT_NAME}: 删除失败`, t, e);
@@ -676,7 +688,7 @@ function organizePreset(rawText, indent) {
         throw new Error('没有找到 prompts 数组');
     }
 
-    // 取出 prompt_order 的 identifier 顺序（兼容 [{order:[...]}] 与 [{identifier}] 两种结构）
+    // 取出 prompt_order 的 identifier 顺序，支持 [{order:[...]}] 与 [{identifier}] 两种结构
     let orderIds = [];
     const po = data.prompt_order;
     if (Array.isArray(po)) {
@@ -690,7 +702,7 @@ function organizePreset(rawText, indent) {
         throw new Error('prompt_order 中没有可识别的 identifier 顺序');
     }
 
-    // identifier → 队列（保留重复项与原始相对顺序）
+    // identifier → 队列，保留重复项与原始相对顺序
     const queues = new Map();
     for (const p of data.prompts) {
         const id = p && typeof p.identifier === 'string' ? p.identifier : null;
@@ -704,7 +716,7 @@ function organizePreset(rawText, indent) {
         const q = queues.get(id);
         if (q && q.length) out.push(q.shift());
     }
-    // 剩下的（不在 order 里的 / 重复的）按原顺序补到末尾；无 identifier 的原样保留
+    // 未进入顺序表的条目按原相对顺序补到末尾，无 identifier 的原样保留
     for (const p of data.prompts) {
         const id = p && typeof p.identifier === 'string' ? p.identifier : null;
         if (id === null) { out.push(p); continue; }
@@ -865,12 +877,17 @@ function buildImageListBody(body) {
         if (added.length) toast('success', `已添加 ${added.length} 张图片`);
     });
 
-    const enabledCheck = el('input', { type: 'checkbox' });
-    enabledCheck.checked = S().images.enabled;
-    enabledCheck.addEventListener('change', () => {
-        S().images.enabled = enabledCheck.checked;
+    // 发送模式由用户按需选择
+    const modeSelect = el('select', { class: 'text_pole', title: '发送图片 / 输出文字标记 / 停用宏输出' }, [
+        el('option', { value: 'image', text: '发送图片' }),
+        el('option', { value: 'text', text: '仅文字标记' }),
+        el('option', { value: 'off', text: '停用宏输出' }),
+    ]);
+    modeSelect.value = S().images.mode || 'image';
+    modeSelect.addEventListener('change', () => {
+        S().images.mode = modeSelect.value;
         persist();
-        toast('info', enabledCheck.checked ? '宏替换已启用' : '宏替换已停用');
+        toast('info', `图片发送模式：${modeSelect.selectedOptions[0].text}`);
     });
 
     const compressCheck = el('input', { type: 'checkbox' });
@@ -885,7 +902,7 @@ function buildImageListBody(body) {
             el('button', { class: 'menu_button', type: 'button', text: '上传图片', onclick: () => uploadInput.click() }),
             uploadInput,
             el('label', { class: 'st-itk-check' }, [compressCheck, el('span', { text: '上传时自动压缩' })]),
-            el('label', { class: 'st-itk-check' }, [enabledCheck, el('span', { text: '启用宏替换' })]),
+            el('label', { class: 'st-itk-check' }, [el('span', { text: '发送模式' }), modeSelect]),
         ]),
         list,
     );
@@ -930,14 +947,9 @@ function renderImageList() {
                         if (!name || name === meta.name) return;
                         if (imageIndex.has(name)) { toast('error', '已存在同名图片'); return; }
                         unindexImage(meta.name);
-                        const oldName = meta.name;
                         meta.name = name;
                         const dataUrl = await idbGet(meta.id);
                         if (dataUrl) indexImage(meta, dataUrl);
-                        try {
-                            legacyMacros?.unregisterMacro?.(`${MACRO_NAME}::${oldName}`);
-                            if (typeof legacyMacros?.syncImageMacros === 'function') legacyMacros.syncImageMacros();
-                        } catch { /* ignore */ }
                         persist();
                         renderImageList();
                     },
@@ -1007,12 +1019,12 @@ function buildCleanupBody(body) {
 }
 
 function buildPresetBody(body) {
-    // 预览框 1：JSON 内容（可直接编辑）
+    // JSON 预览框：可直接编辑
     const input = el('textarea', {
         class: 'text_pole st-itk-panel-textarea st-itk-json-box',
         placeholder: 'JSON 内容全部显示在这里，可直接编辑；或点“上传文件”载入 .json',
     });
-    // 整理预览框：未整理时隐藏
+    // 整理预览框：整理后显示
     const output = el('textarea', {
         class: 'text_pole st-itk-panel-textarea st-itk-json-box',
         placeholder: '整理结果', readonly: 'readonly',
@@ -1102,7 +1114,7 @@ function buildPresetBody(body) {
     const helpBtn = el('button', { class: 'menu_button', type: 'button', text: '功能说明' });
     helpBtn.addEventListener('click', () => { helpText.hidden = !helpText.hidden; });
 
-    // ---- 导出（整理预览框之后）----
+    // ---- 导出 ----
     const exportBtn = el('button', {
         class: 'menu_button', type: 'button', text: '导出',
         onclick: () => {
@@ -1176,24 +1188,24 @@ function buildUi() {
         return;
     }
 
-    // 内部四个功能区（默认收纳，点顶部按钮展开）
+    // 四个功能区，默认收纳
     const inner = el('div', { class: 'st-itk-body', hidden: 'hidden' }, [
         section('聊天记录清理', 'fa-solid fa-broom', buildCleanupBody,
             '扫描最后聊天时间早于 N 天的角色卡及其聊天记录，勾选后批量删除。<b>当前打开的聊天会自动跳过</b>；删除不可恢复，建议先自行备份。支持按“角色最后聊天时间”或“每条聊天最后消息时间”两种口径过滤。'),
         section('图片插入（宏）', 'fa-solid fa-image', buildImageBody,
-            '上传图片后点“复制宏”得到 <span class="st-itk-mono">{{img::图片名}}</span>，粘贴到<b>世界书 / 角色描述 / 预设提示词 / 聊天</b>任意位置，发请求时自动替换为真正的图片内容（支持视觉模型，Claude / Gemini / OpenRouter 自动转换；不支持图片的 API 自动降级为文字）。<b>点击缩略图可预览大图</b>。'),
+            '上传图片后点“复制宏”得到 <span class="st-itk-mono">{{img::图片名}}</span>，粘贴到<b>世界书 / 角色描述 / 预设提示词 / 聊天</b>任意位置。请求发出时宏解析为和 ST 原生图片附件一样的图片内容块，base64 不进正文、不占文本 token，一张图按图片计费（约几百 token）。「发送模式」：<b>发送图片</b>（默认，直接发送图片内容块）、<b>输出文字标记</b>（输出 [图片: 名称]，适合纯文本模型）、<b>停用宏输出</b>（输出为空）。纯文本补全 API 不承载图片，统一以文字标记呈现。<b>点击缩略图可预览大图</b>。'),
         section('Preset JSON 整理器', 'fa-solid fa-list-ordered', buildPresetBody),
         section('图片格式转换', 'fa-solid fa-file-image', buildConvertBody,
             'JPG / PNG 互转。质量调节对 JPG 有效（PNG 为无损格式）；缩放对两者都有效。透明背景转 JPG 会自动铺白底。'),
     ]);
 
-    // 顶部收纳按钮：整个插件的总开关式折叠
+    // 顶部收纳按钮：展开 / 收起面板
     const topHead = el('button', {
         class: 'st-itk-head st-itk-top', type: 'button', 'aria-expanded': 'false',
     }, [
         el('i', { class: 'fa-solid fa-toolbox' }),
         el('span', { text: EXT_NAME }),
-        el('span', { class: 'st-itk-ver', text: '正式版 2.1' }),
+        el('span', { class: 'st-itk-ver', text: '2.3.0' }),
         el('i', { class: 'fa-solid fa-chevron-down st-itk-chev' }),
     ]);
     topHead.addEventListener('click', () => {
@@ -1215,9 +1227,9 @@ let inited = false;
 async function init() {
     if (inited) return;
     inited = true;
-    try { S(); } catch { /* ignore */ }
+    S();
 
-    // 1) 图片库载入内存（宏的数据源）
+    // 图片库载入内存，作为宏的数据源
     try {
         for (const meta of S().imageMeta.slice()) {
             const dataUrl = await idbGet(meta.id);
@@ -1227,48 +1239,19 @@ async function init() {
         console.warn(`${EXT_NAME}: 图片库载入失败`, e);
     }
 
-    // 2) 宏引擎（新版优先，旧版兜底）
-    try {
-        const mod = await import('../../../macros/macro-system.js');
-        macrosApi = mod.macros || null;
-    } catch { /* 旧版 ST 没有新宏引擎 */ }
-    try {
-        const mod = await import('../../../macros.js');
-        legacyMacros = mod.MacrosParser || mod.macros || null;
-    } catch { /* ignore */ }
-    registerMacro();
+    // 注册图片宏
+    await registerImageMacro();
 
-    // 3) 请求拦截（把 <img data:> 变成真正的图片内容）
-    patchFetch();
+    // 挂接请求流水线
+    hookRequestPipeline();
 
-    // 4) 跟随 ST 的“媒体内联”设置（若能读到）
-    try {
-        openaiMod = await import('../../../openai.js');
-    } catch { /* ignore */ }
-
-    // 5) 兼容清理：旧版“位置注入”已移除，清掉遗留的提示词注入并删除旧设置
-    try {
-        const legacyInjections = (extension_settings[EXT_ID] || {}).injections;
-        if (Array.isArray(legacyInjections)) {
-            for (const inj of legacyInjections) {
-                if (inj && inj.id) {
-                    try { setExtensionPrompt(`stItkImg_${inj.id}`, '', 0, 0, false, 0); } catch { /* ignore */ }
-                }
-            }
-        }
-    } catch { /* ignore */ }
-    delete S().injections;
-
-    // 6) UI
+    // 构建设置面板
     buildUi();
     eventSource.on(event_types.APP_READY, () => buildUi());
-
     eventSource.on(event_types.SETTINGS_LOADED, () => { S(); });
     console.log(`${EXT_NAME}: 初始化完成`);
 }
 
-// 新版 ST：manifest hooks.activate 调用 init
+// 启动入口：manifest hooks.activate 与页面就绪后都会触发，init 幂等
 export { init };
-
-// 兜底：无 hooks 支持的旧版 ST / 手动启用
 jQuery(() => setTimeout(() => init().catch(e => console.error(EXT_NAME, e)), 0));
