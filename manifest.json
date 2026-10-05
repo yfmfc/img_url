@@ -1,12 +1,12 @@
 {
-    "display_name": "图片工具箱 Image Toolkit",
+    "display_name": "TavernKit 工具箱",
     "loading_order": 10,
     "requires": [],
     "optional": [],
     "js": "index.js",
     "css": "style.css",
     "author": "user",
-    "version": "2.3.0",
+    "version": "3.0.0",
     "homePage": "",
     "hooks": {
         "activate": "init"

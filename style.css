@@ -1,4 +1,4 @@
-/* Image Toolkit —— 全部配色取自 SillyTavern 当前主题变量，自动跟随用户主题 */
+/* TavernKit —— 全部配色取自 SillyTavern 当前主题变量，自动跟随用户主题 */
 
 #st-itk-panel {
     display: flex;
@@ -20,12 +20,6 @@
 }
 
 /* 顶部总收纳按钮 */
-.st-itk-top {
-    font-size: 1.06em;
-    padding: 11px 12px;
-    border-radius: 10px;
-}
-
 .st-itk-title .st-itk-ver {
     font-size: 0.75em;
     opacity: .6;
@@ -273,12 +267,64 @@
     font-weight: 500;
 }
 
+/* 横排分类 Tab */
+.st-itk-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.st-itk-tab {
+    flex: 1 1 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 6%, transparent);
+    color: var(--SmartThemeBodyColor);
+    cursor: pointer;
+    font-size: 0.92em;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.st-itk-tab:hover {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 12%, transparent);
+}
+
+.st-itk-tab.active {
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 22%, transparent);
+    border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 45%, transparent);
+}
+
+.st-itk-panes {
+    display: flex;
+    flex-direction: column;
+}
+
+.st-itk-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.st-itk-pane[hidden] {
+    display: none;
+}
+
 /* 移动端：按钮与条目尽量占满一行，避免一次性铺满整个屏幕 */
 @media (max-width: 768px) {
 
     .st-itk-row>.menu_button,
     .st-itk-row>.st-itk-grow {
         flex: 1 1 100%;
+    }
+
+    .st-itk-tab {
+        flex: 1 1 30%;
     }
 
     .st-itk-item .st-itk-sp {

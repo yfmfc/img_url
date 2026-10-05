@@ -1,12 +1,15 @@
 /**
- * Image Toolkit —— SillyTavern 图片工具箱
+ * TavernKit —— SillyTavern 工具箱
  *
- * 功能：
- *   1. 聊天记录清理：按“最后聊天时间距今 N 天”扫描角色卡并批量删除聊天
- *   2. 图片插入：图片库 + 宏 {{img::图片名}}，放在世界书 / 角色描述 / 预设 / 聊天的任意位置，
- *      请求发出时解析为图片内容块，让模型直接看到图片
- *   3. Preset JSON 整理器：按 prompt_order 的顺序重排 prompts 数组，其余原样保留
- *   4. 图片格式转换：JPG / PNG 互转 + 质量 / 缩放压缩
+ * 功能（横排分类 Tab）：
+ *   实用：
+ *     1. 聊天记录清理：按“最后聊天时间距今 N 天”扫描角色卡并批量删除聊天
+ *     2. 图片宏：图片库 + 宏 {{img::图片名}}，在聊天消息中插入图片
+ *   文件：
+ *     3. 查找替换 / 整理：Preset JSON 编辑、按 prompt_order 重排 prompts
+ *     4. 图片格式转换：JPG / PNG 互转 + 质量 / 缩放压缩
+ *   状态机：
+ *     5. FN 函数：世界书声明状态字段，AI 随剧情维护，值随聊天记录走
  *
  * 界面挂载在 SillyTavern 的扩展设置抽屉里，全部控件使用原生样式类与主题变量，
  * 自动跟随当前主题，移动端自适应。
@@ -24,7 +27,7 @@ import { Popup, POPUP_TYPE } from '../../../popup.js';
 // 常量 & 设置
 // ---------------------------------------------------------------------------
 
-const EXT_NAME = 'Image Toolkit';
+const EXT_NAME = 'TavernKit';
 const EXT_ID = 'stImageToolkit';
 const MACRO_NAME = 'img';
 const DB_NAME = 'st-image-toolkit';
@@ -38,6 +41,11 @@ const DEFAULT_SETTINGS = {
         quality: 0.85,          // 自动压缩质量
     },
     imageMeta: [],              // 图片元数据 [{id, name, mime, bytes, width, height, created}]
+    state: {
+        enabled: true,          // 状态机总开关
+        defTag: 'fn定义',       // 函数定义标签
+        updTag: 'fn更新',       // AI 维护输出标签
+    },
     cleanup: {
         days: 30,
         mode: 'character',      // character=按角色最后聊天时间 | chat=按每条聊天最后消息时间
@@ -333,7 +341,7 @@ async function registerImageMacro() {
     try {
         macroApi.register(MACRO_NAME, {
             category: macroApi.category?.CORE ?? 'core',
-            description: '把图片库中的图片插入提示词（请求发出时解析为图片内容块）',
+            description: '把图片库中的图片插入消息（请求发出时解析为图片内容块）',
             displayOverride: '{{img::图片名}}',
             exampleUsage: ['{{img::角色立绘}}'],
             unnamedArgs: [{ name: 'name', optional: false, sampleValue: '角色立绘', description: '图片库中的图片名' }],
@@ -463,10 +471,11 @@ function hookRequestPipeline() {
         return;
     }
 
-    // 聊天补全：占位符解析为图片内容块
+    // 聊天补全：状态机处理 + 图片占位符解析
     eventSource.on(ready, (eventData) => {
         try {
             if (eventData?.dryRun) return;
+            stateMachineProcessChat(eventData?.chat);
             const count = transformChatMessages(eventData?.chat);
             if (count) console.log(`${EXT_NAME}: 已为 ${count} 条消息解析图片内容块`);
         } catch (e) {
@@ -474,12 +483,14 @@ function hookRequestPipeline() {
         }
     });
 
-    // 纯文本补全：图片以文字标记呈现（纯文本 API 本身不承载图片）
+    // 纯文本补全：状态机处理 + 图片以文字标记呈现（纯文本 API 本身不承载图片）
     eventSource.on(combined, (eventData) => {
         try {
             if (eventData?.dryRun) return;
-            if (typeof eventData?.prompt === 'string' && eventData.prompt.includes('data-itk')) {
-                eventData.prompt = replaceWithMarkers(eventData.prompt);
+            if (typeof eventData?.prompt === 'string') {
+                let prompt = stateMachineProcessText(eventData.prompt);
+                if (prompt.includes('data-itk')) prompt = replaceWithMarkers(prompt);
+                eventData.prompt = prompt;
             }
         } catch (e) {
             console.warn(`${EXT_NAME}: 改写文本提示词时出现问题`, e);
@@ -738,10 +749,10 @@ function downloadText(filename, text, mime = 'application/json') {
     setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
-async function copyText(text) {
+async function copyText(text, okMsg) {
     try {
         await navigator.clipboard.writeText(text);
-        toast('success', '已复制到剪贴板');
+        toast('success', okMsg || '已复制到剪贴板');
     } catch {
         const ta = el('textarea', { style: { position: 'fixed', opacity: '0' } });
         ta.value = text;
@@ -749,7 +760,7 @@ async function copyText(text) {
         ta.select();
         document.execCommand('copy');
         ta.remove();
-        toast('success', '已复制到剪贴板');
+        toast('success', okMsg || '已复制到剪贴板');
     }
 }
 
@@ -820,7 +831,225 @@ async function runConvert(files) {
 }
 
 // ---------------------------------------------------------------------------
-// UI 构建（全部收纳式折叠面板，原生样式，自适应主题）
+// 状态机（FN 函数）：世界书声明字段，AI 随剧情维护
+// ---------------------------------------------------------------------------
+//
+// 数据流：定义标签块声明字段与默认值（渲染为当前值，模型看到即可维护）；
+// AI 回复末尾的更新标签块写变更，发请求前剥离。值随聊天记录走：
+// 删楼层即回滚，新聊天回到默认值，定义块与引用渲染同一值（单一数据源）。
+
+function cleanTag(t, fallback) {
+    const v = String(t ?? '').trim().replace(/^[<\[{]+/, '').replace(/[>\]}]+$/, '').trim();
+    return v || fallback;
+}
+
+function stateTags() {
+    const s = S().state;
+    return { def: cleanTag(s.defTag, 'fn定义'), upd: cleanTag(s.updTag, 'fn更新') };
+}
+
+function escRe(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** 成对块的正则（标签名按用户配置精确匹配） */
+function blockRe(tag) {
+    return new RegExp(`<${escRe(tag)}\\s*>([\\s\\S]*?)</${escRe(tag)}\\s*>`, 'gi');
+}
+
+const FIELD_LINE_RE = /^([^=：:]+)([=：:])(.*)$/;
+const NAME_MAX = 30;
+
+/** 名字规范化：去空白，剥掉随手加的包裹符号 */
+function normalizeName(raw) {
+    return String(raw)
+        .trim()
+        .replace(/^[[【"'“「]+/, '')
+        .replace(/[\]】"'”」]+$/, '')
+        .trim();
+}
+
+/** 解析一行 `名字 = 值`：注释/空行返回 null，坏行返回 {error}，成功返回 {name, value} */
+function parseFieldLine(raw) {
+    const line = String(raw).trim();
+    if (!line || line.startsWith('#') || line.startsWith('//')) return null;
+    const m = FIELD_LINE_RE.exec(line);
+    if (!m) return { error: `无法识别的行：${line}` };
+    const name = normalizeName(m[1]);
+    if (!name || name.length > NAME_MAX || /[=：:<>"\n]/.test(name)) {
+        return { error: `字段名不合规：${line}` };
+    }
+    const v = m[3].trim();
+    const pairs = [['"', '"'], ['“', '”'], ['「', '」'], ["'", "'"]];
+    for (const [o, c] of pairs) {
+        if (v.startsWith(o) && v.endsWith(c) && v.length >= 2) {
+            return { name, value: unescapeValue(v.slice(o.length, v.length - c.length)) };
+        }
+    }
+    if (/^["“「']/.test(v)) return { error: `引号不成对：${line}` };
+    return { name, value: unescapeValue(v) };
+}
+
+function unescapeValue(s) {
+    return s.replace(/\\(n|\\|.)/g, (_m, g) => (g === 'n' ? '\n' : g));
+}
+
+function formatValue(v) {
+    return String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+}
+
+function lookupField(name, defaults, current) {
+    if (current.has(name)) return current.get(name);
+    if (defaults.has(name)) return defaults.get(name);
+    return undefined;
+}
+
+/** 解析报告：失败可见，面板展示、控制台留详情 */
+const stateReport = { skipped: 0, missing: 0 };
+
+function reportState() {
+    if (!ui.stateStatus) return;
+    ui.stateStatus.textContent = (stateReport.skipped || stateReport.missing)
+        ? `上次请求：${stateReport.skipped} 行未读懂、${stateReport.missing} 处引用未定义（详见控制台）`
+        : '上次请求：全部解析正常';
+}
+
+/** 收集全部文本的定义（默认值）与更新（叠加到当前值） */
+function stateMachineAnalyze(texts) {
+    const { def, upd } = stateTags();
+    const defaults = new Map();
+    const current = new Map();
+    stateReport.skipped = 0;
+    stateReport.missing = 0;
+
+    // 定义块：字段 + 默认值（后出现的覆盖先出现的）
+    for (const text of texts) {
+        for (const m of text.matchAll(blockRe(def))) {
+            for (const line of m[1].split(/\r?\n/)) {
+                const f = parseFieldLine(line);
+                if (!f) continue;
+                if (f.error) { stateReport.skipped++; console.warn(`${EXT_NAME}[状态机] ${f.error}`); continue; }
+                defaults.set(f.name, f.value);
+            }
+        }
+    }
+    for (const [k, v] of defaults) current.set(k, v);
+
+    // 更新块：按楼层顺序叠加（后楼覆盖前楼，空值 = 清除 → 回落默认值）
+    for (const text of texts) {
+        for (const m of text.matchAll(blockRe(upd))) {
+            for (const line of m[1].split(/\r?\n/)) {
+                const f = parseFieldLine(line);
+                if (!f) continue;
+                if (f.error) { stateReport.skipped++; console.warn(`${EXT_NAME}[状态机] ${f.error}`); continue; }
+                if (f.value === '') current.delete(f.name);
+                else current.set(f.name, f.value);
+            }
+        }
+    }
+    return { defaults, current };
+}
+
+/** 单段文本的渲染：定义块填当前值、{{fn:名字}} 引用替换、更新块剥离 */
+function renderStateText(text, defaults, current) {
+    const { def, upd } = stateTags();
+    let out = text.replace(blockRe(upd), '');
+    out = out.replace(blockRe(def), (_whole, inner) => {
+        const lines = inner.split(/\r?\n/).map((line) => {
+            const f = parseFieldLine(line);
+            if (!f || f.error) return line;
+            const value = lookupField(f.name, defaults, current) ?? '';
+            return `${f.name} = "${formatValue(value)}"`;
+        });
+        return `<${def}>${lines.join('\n')}</${def}>`;
+    });
+    out = out.replace(/\{\{\s*fn\s*[：:]\s*([^}]+?)\s*\}\}/g, (whole, rawName) => {
+        const name = normalizeName(rawName);
+        const value = lookupField(name, defaults, current);
+        if (value === undefined) {
+            stateReport.missing++;
+            console.warn(`${EXT_NAME}[状态机] 未定义的引用：${name}`);
+            return whole;
+        }
+        return value;
+    });
+    return out;
+}
+
+function stateMachineProcessChat(chat) {
+    if (!S().state.enabled || !Array.isArray(chat)) return;
+    const items = [];
+    const texts = [];
+    for (const msg of chat) {
+        if (!msg) continue;
+        if (typeof msg.content === 'string') {
+            items.push({ obj: msg, key: 'content' });
+            texts.push(msg.content);
+        } else if (Array.isArray(msg.content)) {
+            for (const part of msg.content) {
+                if (part && part.type === 'text' && typeof part.text === 'string') {
+                    items.push({ obj: part, key: 'text' });
+                    texts.push(part.text);
+                }
+            }
+        }
+    }
+    if (!items.length) return;
+    const { defaults, current } = stateMachineAnalyze(texts);
+    for (const it of items) it.obj[it.key] = renderStateText(it.obj[it.key], defaults, current);
+    reportState();
+}
+
+function stateMachineProcessText(text) {
+    if (!S().state.enabled || typeof text !== 'string') return text;
+    const { defaults, current } = stateMachineAnalyze([text]);
+    const out = renderStateText(text, defaults, current);
+    reportState();
+    return out;
+}
+
+/** 维护提示词：笼统规则 + 大众示例，标签按用户配置替换 */
+function buildMaintainPrompt() {
+    const { def, upd } = stateTags();
+    return `状态维护规则
+
+一、这是什么
+提示词中出现的 <${def}> 块是需要你随剧情维护的状态数据。每行一个字段，格式为：字段名 = "值"。
+块中显示的是当前值。块内数据由你负责维护，块外的普通文字不归你管理。
+
+二、什么时候更新
+- 剧情推进引起某个字段变化时更新（时间流逝、关系变化、获得或失去物品、地点转移、状态改变等）
+- 只写发生变化的字段，没变的字段不要写
+- 值可以是任意文字：一个数字、一个词、一句话描述都可以
+- 想清空某个字段，就把值留空
+
+三、怎么输出
+在每次回复的最末尾（剧情文本之后）输出更新块，块内每行一个“字段名 = 值”：
+
+<${upd}>
+字段名 = "新值"
+字段名 = "新值"
+</${upd}>
+
+示例（仅示范格式，字段名以你在 <${def}> 块中看到的为准）：
+
+<${upd}>
+小明的年龄 = "19"
+小明的心情 = "有点困"
+小明的物品 = "薄荷糖、旧手帕"
+</${upd}>
+
+没有需要更新的字段时，不要输出更新块。`;
+}
+
+/** 函数模板：一条现成格式，用户一眼看懂 */
+function buildFieldTemplate() {
+    const { def } = stateTags();
+    return `<${def}>\n函数名 = "值"\n</${def}>`;
+}
+
+// ---------------------------------------------------------------------------
+// UI 构建（横排分类 Tab，原生样式，自适应主题）
 // ---------------------------------------------------------------------------
 
 const ui = {};
@@ -1180,6 +1409,53 @@ function buildConvertBody(body) {
     );
 }
 
+function buildStateBody(body) {
+    const enabledCheck = el('input', { type: 'checkbox' });
+    enabledCheck.checked = S().state.enabled !== false;
+    enabledCheck.addEventListener('change', () => {
+        S().state.enabled = enabledCheck.checked;
+        persist();
+        toast('info', enabledCheck.checked ? '状态机已启用' : '状态机已停用');
+    });
+
+    const defInput = el('input', { class: 'text_pole st-itk-grow', type: 'text', value: stateTags().def, title: '函数定义标签（如 fn定义）' });
+    defInput.addEventListener('change', () => {
+        S().state.defTag = cleanTag(defInput.value, 'fn定义');
+        defInput.value = S().state.defTag;
+        persist();
+    });
+    const updInput = el('input', { class: 'text_pole st-itk-grow', type: 'text', value: stateTags().upd, title: 'AI 维护输出标签（如 fn更新）' });
+    updInput.addEventListener('change', () => {
+        S().state.updTag = cleanTag(updInput.value, 'fn更新');
+        updInput.value = S().state.updTag;
+        persist();
+    });
+
+    const copyTplBtn = el('button', { class: 'menu_button', type: 'button', text: '复制函数模板' });
+    copyTplBtn.addEventListener('click', () => copyText(buildFieldTemplate(), '已复制函数模板'));
+
+    const copyPromptBtn = el('button', { class: 'menu_button', type: 'button', text: '复制维护提示词' });
+    copyPromptBtn.addEventListener('click', () => copyText(buildMaintainPrompt(), '已复制，请新建一个世界书条目粘贴进去'));
+
+    ui.stateStatus = el('div', { class: 'st-itk-hint', text: '尚未发送过请求' });
+
+    body.append(
+        el('div', { class: 'st-itk-row' }, [
+            el('label', { class: 'st-itk-check' }, [enabledCheck, el('span', { text: '启用状态机' })]),
+        ]),
+        el('div', { class: 'st-itk-row' }, [
+            el('span', { text: '函数定义标签' }), defInput,
+            el('span', { text: 'AI 维护输出标签' }), updInput,
+        ]),
+        el('div', { class: 'st-itk-row' }, [copyTplBtn, copyPromptBtn]),
+        el('div', {
+            class: 'st-itk-hint',
+            html: '用法：世界书里用定义标签块声明要 AI 维护的字段（每行 <span class="st-itk-mono">名字 = "值"</span>，块数不限、可分散在多个条目）；正文用 <span class="st-itk-mono">{{fn:名字}}</span> 引用当前值。AI 在回复末尾用输出标签块写变更，发请求前自动剥离。值随聊天记录走：<b>删楼层自动回滚、新聊天回到默认值</b>。',
+        }),
+        ui.stateStatus,
+    );
+}
+
 function buildUi() {
     if (document.getElementById('st-itk-panel')) return;
     const container = document.getElementById('extensions_settings') || document.getElementById('extensions_settings2');
@@ -1188,33 +1464,63 @@ function buildUi() {
         return;
     }
 
-    // 四个功能区，默认收纳
-    const inner = el('div', { class: 'st-itk-body', hidden: 'hidden' }, [
-        section('聊天记录清理', 'fa-solid fa-broom', buildCleanupBody,
-            '扫描最后聊天时间早于 N 天的角色卡及其聊天记录，勾选后批量删除。<b>当前打开的聊天会自动跳过</b>；删除不可恢复，建议先自行备份。支持按“角色最后聊天时间”或“每条聊天最后消息时间”两种口径过滤。'),
-        section('图片插入（宏）', 'fa-solid fa-image', buildImageBody,
-            '上传图片后点“复制宏”得到 <span class="st-itk-mono">{{img::图片名}}</span>，粘贴到<b>世界书 / 角色描述 / 预设提示词 / 聊天</b>任意位置。请求发出时宏解析为和 ST 原生图片附件一样的图片内容块，base64 不进正文、不占文本 token，一张图按图片计费（约几百 token）。「发送模式」：<b>发送图片</b>（默认，直接发送图片内容块）、<b>输出文字标记</b>（输出 [图片: 名称]，适合纯文本模型）、<b>停用宏输出</b>（输出为空）。纯文本补全 API 不承载图片，统一以文字标记呈现。<b>点击缩略图可预览大图</b>。'),
-        section('Preset JSON 整理器', 'fa-solid fa-list-ordered', buildPresetBody),
-        section('图片格式转换', 'fa-solid fa-file-image', buildConvertBody,
-            'JPG / PNG 互转。质量调节对 JPG 有效（PNG 为无损格式）；缩放对两者都有效。透明背景转 JPG 会自动铺白底。'),
-    ]);
+    const tabs = [
+        {
+            id: 'util', label: '实用', icon: 'fa-solid fa-wand-magic-sparkles',
+            sections: () => [
+                section('聊天记录清理', 'fa-solid fa-broom', buildCleanupBody,
+                    '扫描最后聊天时间早于 N 天的角色卡及其聊天记录，勾选后批量删除。<b>当前打开的聊天会自动跳过</b>；删除不可恢复，建议先自行备份。支持按“角色最后聊天时间”或“每条聊天最后消息时间”两种口径过滤。'),
+                section('图片宏', 'fa-solid fa-image', buildImageBody,
+                    '上传图片后点“复制宏”得到 <span class="st-itk-mono">{{img::图片名}}</span>，粘贴到<b>聊天消息</b>里即可让模型看到图片（请求发出时解析为图片内容块，base64 不进正文）。目前仅支持聊天消息，暂不支持世界书 / 系统提示词区域。「发送模式」：<b>发送图片</b>（默认）、<b>输出文字标记</b>（[图片: 名称]，适合纯文本模型）、<b>停用宏输出</b>。点击缩略图可预览大图。'),
+            ],
+        },
+        {
+            id: 'files', label: '文件', icon: 'fa-solid fa-folder-open',
+            sections: () => [
+                section('查找替换 / 整理', 'fa-solid fa-list-ordered', buildPresetBody),
+                section('图片格式转换', 'fa-solid fa-file-image', buildConvertBody,
+                    'JPG / PNG 互转。质量调节对 JPG 有效（PNG 为无损格式）；缩放对两者都有效。透明背景转 JPG 会自动铺白底。'),
+            ],
+        },
+        {
+            id: 'state', label: '状态机', icon: 'fa-solid fa-diagram-project',
+            sections: () => [
+                section('状态机（FN 函数）', 'fa-solid fa-diagram-project', buildStateBody,
+                    '世界书里用定义标签块声明要 AI 维护的状态（每行 <span class="st-itk-mono">名字 = "值"</span>），正文用 <span class="st-itk-mono">{{fn:名字}}</span> 引用当前值；AI 随剧情在回复末尾输出更新块。值随聊天记录走：<b>删楼层自动回滚、新聊天回到默认值</b>。点「复制维护提示词」后新建世界书条目粘贴即可。'),
+            ],
+        },
+    ];
 
-    // 顶部收纳按钮：展开 / 收起面板
-    const topHead = el('button', {
-        class: 'st-itk-head st-itk-top', type: 'button', 'aria-expanded': 'false',
-    }, [
+    const tabBar = el('div', { class: 'st-itk-tabs' });
+    const paneBox = el('div', { class: 'st-itk-panes' });
+    const pairs = [];
+    for (const tab of tabs) {
+        const pane = el('div', { class: 'st-itk-pane' }, tab.sections());
+        const btn = el('button', { class: 'st-itk-tab', type: 'button' }, [
+            el('i', { class: tab.icon }),
+            el('span', { text: tab.label }),
+        ]);
+        btn.addEventListener('click', () => {
+            for (const [b, p] of pairs) { b.classList.remove('active'); p.hidden = true; }
+            btn.classList.add('active');
+            pane.hidden = false;
+        });
+        pairs.push([btn, pane]);
+        tabBar.append(btn);
+        paneBox.append(pane);
+    }
+    if (pairs.length) {
+        pairs[0][0].classList.add('active');
+        for (let i = 1; i < pairs.length; i++) pairs[i][1].hidden = true;
+    }
+
+    const head = el('div', { class: 'st-itk-title' }, [
         el('i', { class: 'fa-solid fa-toolbox' }),
         el('span', { text: EXT_NAME }),
-        el('span', { class: 'st-itk-ver', text: '2.3.0' }),
-        el('i', { class: 'fa-solid fa-chevron-down st-itk-chev' }),
+        el('span', { class: 'st-itk-ver', text: '3.0.0' }),
     ]);
-    topHead.addEventListener('click', () => {
-        const open = inner.hidden;
-        inner.hidden = !open;
-        topHead.setAttribute('aria-expanded', String(open));
-    });
 
-    const panel = el('div', { id: 'st-itk-panel' }, [topHead, inner]);
+    const panel = el('div', { id: 'st-itk-panel' }, [head, tabBar, paneBox]);
     container.append(panel);
 }
 
